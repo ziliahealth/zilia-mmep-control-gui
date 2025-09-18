@@ -1,7 +1,8 @@
 from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QDateTime, QIODevice,QTimer
 from PyQt5.QtSerialPort import QSerialPort, QSerialPortInfo
 
-class ArduinoThread(QThread):
+class MCUThread(QThread):
+    #QThread object to send and receive data from the serial port
     data_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)
     running_signal = pyqtSignal(bool)
@@ -12,13 +13,13 @@ class ArduinoThread(QThread):
 
         self.connected = False
         self.running = False
-        self.Arduino = None  # Initialize the arduino variable
+        self.mcu = None  # Initialize the mcu variable
 
     def run(self):
         # Modify the COM port based on your setup
-        if self.running & self.Arduino.canReadLine():
+        if self.running & self.mcu.canReadLine():
             try:
-                data = self.Arduino.readLine(maxlen=1000)
+                data = self.mcu.readLine(maxlen=1000)
                 data_decoded = data.decode()
                 self.data_signal.emit(data_decoded)
 
@@ -26,12 +27,12 @@ class ArduinoThread(QThread):
                 pass
 
     def start(self):
-        print('arduino_start')
+        print('mcu_start')
         if self.connected and (not self.running):
             self.log_signal.emit('start button clicked')
-            self.Arduino.clear()
+            self.mcu.clear()
             self.command = 'start\n'
-            self.Arduino.write(self.command.encode())
+            self.mcu.write(self.command.encode())
             self.running = True
             self.running_signal.emit(True)
         else:
@@ -41,7 +42,7 @@ class ArduinoThread(QThread):
         if self.connected and self.running:
             self.log_signal.emit('Stopping pumps')
             self.command = 'stop\n'
-            self.Arduino.write(self.command.encode())
+            self.mcu.write(self.command.encode())
             self.running = False
             self.running_signal.emit(False)
 
@@ -53,28 +54,28 @@ class ArduinoThread(QThread):
             print(port.description())
             if "CH340" in port.description():
                 try:
-                    # Establish a connection with the Arduino Nano
+                    # Establish a connection with the mcu
                     self.connected = True
-                    self.log_signal.emit(f"Connection to Arduino Nano successful on {port.portName()}")
+                    self.log_signal.emit(f"Connection to mcu successful on {port.portName()}")
                     print(port.portName)
-                    self.Arduino = QSerialPort(port.portName(), baudRate='BAUD9600')
-                    self.Arduino.open(QIODevice.ReadWrite)
-                    self.Arduino.readyRead.connect(self.run, Qt.QueuedConnection)
+                    self.mcu = QSerialPort(port.portName(), baudRate='BAUD9600')
+                    self.mcu.open(QIODevice.ReadWrite)
+                    self.mcu.readyRead.connect(self.run, Qt.QueuedConnection)
                     self.connected_signal.emit(True)
 
                 except QSerialPort.OpenError:
-                    self.log_signal.emit(f"Failed to connect to Arduino Nano on{port.portName()}")
+                    self.log_signal.emit(f"Failed to connect to mcu on{port.portName()}")
                     self.connected_signal.emit(False)
-        if self.Arduino == None:
-            self.log_signal.emit(f"No Arduino connected")
+        if self.mcu == None:
+            self.log_signal.emit(f"No mcu connected")
             self.connected_signal.emit(False)
 
     def disconnect(self):
-        if self.Arduino:
+        if self.mcu:
             print('disconnect button clicked')
-            self.Arduino.clear()
-            self.Arduino.close()
-            self.Arduino = None
+            self.mcu.clear()
+            self.mcu.close()
+            self.mcu = None
             self.connected = False
             self.connected_signal.emit(False)
 

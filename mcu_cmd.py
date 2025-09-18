@@ -1,15 +1,15 @@
 from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QDateTime, QIODevice,QTimer
 from PyQt5.QtSerialPort import QSerialPort, QSerialPortInfo
 import time
-class ArduinoThread(QThread):
-    #QThread object to handle communication with the Arduino Nano
-    #Messages are sent and received between ArduinoThread and Arduino in the
+class MCUThread(QThread):
+    #QThread object to handle communication with the mcu Nano
+    #Messages are sent and received between mcuThread and mcu in the
     # form ![command] [arguments]\r\n
-    #The ArduinoThread object listens for incoming messages and dispatches
+    #The mcuThread object listens for incoming messages and dispatches
     #them to the appropriate callback function
-    #The ArduinoThread object also sends messages to the Arduino
-    #The ArduinoThread object is also responsible for establishing and
-    #terminating the connection with the Arduino
+    #The mcuThread object also sends messages to the mcu
+    #The mcuThread object is also responsible for establishing and
+    #terminating the connection with the mcu
 
     sensor_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str)
@@ -22,7 +22,7 @@ class ArduinoThread(QThread):
 
         self.connected = False
         self.running = False
-        self.Arduino = None  # Initialize the arduino variable
+        self.mcu = None  # Initialize the mcu variable
 
         # Define the callback functions
         self.callbacks = {'!kAcknowledge': self.onAcknowledge,
@@ -37,9 +37,9 @@ class ArduinoThread(QThread):
         # }
 
     # def read_message(self):
-    #     if self.Arduino.canReadLine():
+    #     if self.mcu.canReadLine():
     #         try:
-    #             msg = self.Arduino.readLine(maxlen=1000)
+    #             msg = self.mcu.readLine(maxlen=1000)
     #             msg_decoded = msg.decode().split(',')
     #             print('Reading message:'+ msg_decoded[0]+','+msg_decoded[1])
     #             k = msg_decoded[0]
@@ -52,9 +52,9 @@ class ArduinoThread(QThread):
     #         except ValueError:
     #             pass
     def read_message(self):
-        if self.Arduino.canReadLine():
+        if self.mcu.canReadLine():
             try:
-                message = self.Arduino.readLine(maxlen=1000)
+                message = self.mcu.readLine(maxlen=1000)
                 message_decoded = message.decode()
                 #print(message_decoded)
                 self.handle_message(message_decoded)
@@ -74,17 +74,17 @@ class ArduinoThread(QThread):
     def write_message(self, cmd=None):
         print('Writing message:'+cmd)
         if self.connected:
-            self.Arduino.write(cmd.encode())
+            self.mcu.write(cmd.encode())
 
 
 
     def start(self):
-        print('arduino_start')
+        print('mcu_start')
         if self.connected and (not self.running):
             self.log_signal.emit('start button clicked')
-            self.Arduino.clear()
+            self.mcu.clear()
             self.command = 'start\n'
-            self.Arduino.write(self.command.encode())
+            self.mcu.write(self.command.encode())
             self.running = True
             self.running_signal.emit(True)
         else:
@@ -94,7 +94,7 @@ class ArduinoThread(QThread):
         if self.connected and self.running:
             self.log_signal.emit('Stopping pumps')
             self.command = 'stop\n'
-            self.Arduino.write(self.command.encode())
+            self.mcu.write(self.command.encode())
             self.running = False
             self.running_signal.emit(False)
 
@@ -104,19 +104,19 @@ class ArduinoThread(QThread):
         available_ports = serial_port.availablePorts()
         for port in available_ports:
             print(port.description())
-            if "Leonardo" in port.description():
+            if "USB Serial Device" in port.description():
                 try:
-                    # Establish a connection with the Arduino Nano
+                    # Establish a connection with the mcu Nano
                     self.connected = True
-                    self.log_signal.emit(f"Connection to Arduino Nano successful on {port.portName()}")
+                    self.log_signal.emit(f"Connection to mcu successful on {port.portName()}")
                     print(port.portName)
-                    self.Arduino = QSerialPort(port.portName(), baudRate='BAUD115200')
-                    self.Arduino.open(QIODevice.ReadWrite)
-                    self.Arduino.clear()
-                    self.Arduino.flush()
-                    time.sleep(2)
-                    self.Arduino.readyRead.connect(self.read_message, Qt.QueuedConnection)
-                    #self.write_message('!kAcknowledge Arduinoready\r' )
+                    self.mcu = QSerialPort(port.portName(), baudRate='BAUD115200')
+                    self.mcu.open(QIODevice.ReadWrite)
+                    self.mcu.clear()
+                    self.mcu.flush()
+                    time.sleep(0.5)
+                    self.mcu.readyRead.connect(self.read_message, Qt.QueuedConnection)
+                    #self.write_message('!kAcknowledge mcuready\r' )
                     self.connected_signal.emit(True)
                     #self.update_all_signal.emit(0)
                     #self.update_all_signal.emit(1)
@@ -125,31 +125,31 @@ class ArduinoThread(QThread):
 
 
                 except QSerialPort.OpenError:
-                    self.log_signal.emit(f"Failed to connect to Arduino Nano on{port.portName()}")
+                    self.log_signal.emit(f"Failed to connect to mcu Nano on{port.portName()}")
                     self.connected_signal.emit(False)
-        if self.Arduino == None:
-            self.log_signal.emit(f"No Arduino connected")
+        if self.mcu == None:
+            self.log_signal.emit(f"No mcu connected")
             self.connected_signal.emit(False)
 
     def close(self):
-        if self.Arduino:
+        if self.mcu:
             print('disconnect button clicked')
-            self.Arduino.clear()
-            self.Arduino.close()
-            self.Arduino = None
+            self.mcu.clear()
+            self.mcu.close()
+            self.mcu = None
             self.connected = False
             self.connected_signal.emit(False)
 
     def start_logging(self):
         print('start logging')
-        ## sends a message to the arduino to reset the data buffer and reset the time
-        self.Arduino.clear()
+        ## sends a message to the mcu to reset the data buffer and reset the time
+        self.mcu.clear()
         self.write_message('!kStartLogging\r')
 
     # Define the callback functions
 
     def onAcknowledge(self,arg):
-        if arg == "Arduino Ready":
+        if arg == "mcu Ready":
             self.connected_signal.emit(True)
             self.connected = True
             self.log_signal.emit(arg)
@@ -168,7 +168,7 @@ class ArduinoThread(QThread):
         msg = 'Error : '+arg
         self.log_signal.emit(msg)
         pass
-    def on_syringe_pump_signal(self,msg):
+    def on_flow_controller_signal(self,msg):
         #Method to receive signals from syringepump object and dispatch specific callback functions
         #The method formats th
         # Split the received message into the command and arguments
