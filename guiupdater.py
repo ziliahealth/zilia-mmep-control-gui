@@ -75,10 +75,10 @@ class GUIUpdater(QThread):
             self.start_button.setEnabled(True)
     def update_connectdisconnect_button(self,message):
         if message:
-            self.start_button.setEnabled(True)
+            #self.start_button.setEnabled(True)
             self.start_button.setStyleSheet("border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-            self.connect_button.setText('Disconnect from Arduino')
+            self.connect_button.setText('Disconnect MCU')
         else:
-            self.start_button.setEnabled(False)
-            self.connect_button.setText('Connect to Arduino')
+            #self.start_button.setEnabled(False)
+            self.connect_button.setText('Connect MCU')
             self.start_button.setStyleSheet("border: 2px solid black ; background: black; border-radius: 10px; color: black")
