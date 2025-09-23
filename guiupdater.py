@@ -6,20 +6,16 @@ class GUIUpdater(QThread):
     connected_signal = pyqtSignal(bool)
     recording_signal = pyqtSignal(bool)
 
-    def __init__(self, log_widget, zo_plot_widget, start_button, connect_button):
+    def __init__(self, log_widget, zo_plot_widget,connect_button,flow_controllers_list: list, temp_controllers_list: list, do_sensors_list: list):
         super().__init__()
         self.log_widget = log_widget
         self.zo_plot_widget = zo_plot_widget
-        self.start_button = start_button
         self.connect_button = connect_button
-        self.H20Cal = 18395
-        self.PO2_cal = 21.9*(760-47.1)/100
         self.DO_calibration_coefs = [1, 0, 0 , 0]
-        #self.DO_calibration_coefs[0] =self.PO2_cal/self.H20Cal
         self.avg_n = 20 #number of points to average
-        #create fifo buffer for sensor data
-        self.DO1Buffer = []
-        self.DO2Buffer= []
+        self.flow_controllers = flow_controllers_list
+        self.temp_controllers = temp_controllers_list
+        self.do_sensors = do_sensors_list
     def update_ZO_plot(self,data):
         self.zo_plot_widget.clear()
         self.zo_plot_widget.plot(list(data[:,0]),list(data[:,1]),pen=(139,203,149))
@@ -66,19 +62,9 @@ class GUIUpdater(QThread):
         log_entry = f'{current_time} - {message}'
         self.log_widget.append(log_entry)  # Append to the existing text and scroll to the bottom
 
-    def update_startstop_button(self,message):
-        if message:
-            self.start_button.setText('Stop')
-            self.start_button.setEnabled(True)
-        else:
-            self.start_button.setText('Start')
-            self.start_button.setEnabled(True)
     def update_connectdisconnect_button(self,message):
         if message:
-            #self.start_button.setEnabled(True)
-            self.start_button.setStyleSheet("border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
             self.connect_button.setText('Disconnect MCU')
         else:
             #self.start_button.setEnabled(False)
             self.connect_button.setText('Connect MCU')
-            self.start_button.setStyleSheet("border: 2px solid black ; background: black; border-radius: 10px; color: black")

@@ -1,192 +1,257 @@
-from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QDateTime, QIODevice,QTimer
+from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QIODevice
 from PyQt5.QtSerialPort import QSerialPort, QSerialPortInfo
 import time
-class MCUThread(QThread):
-    #QThread object to handle communication with the mcu Nano
-    #Messages are sent and received between mcuThread and mcu in the
-    # form ![command] [arguments]\r\n
-    #The mcuThread object listens for incoming messages and dispatches
-    #them to the appropriate callback function
-    #The mcuThread object also sends messages to the mcu
-    #The mcuThread object is also responsible for establishing and
-    #terminating the connection with the mcu
 
-    sensor_signal = pyqtSignal(str)
-    log_signal = pyqtSignal(str)
+
+class MCUCommands:
+    """
+    This class defines and formats the commands sent to the MCU.
+
+    It handles the creation of command strings according to the firmware's
+    specifications, including handlers, arguments, unique communication IDs,
+    and checksums. Each method corresponds to a specific command the MCU
+    can understand.
+    """
+
+
+
+
+    # Dissolved Oxygen Sensor Commands
+    DO_START = '$DOSSR,START,'
+    DO_STOP = '$DOSSR,STOP,'
+
+    def __init__(self):
+        self.com_id_counter = 0
+
+    def _generate_com_id(self):
+        """Generates a unique alphanumeric ID for each command."""
+        self.com_id_counter += 1
+        return f"{self.com_id_counter:04d}"
+
+    def _calculate_checksum(self, command_body):
+        """Calculates a checksum for the command string (placeholder)."""
+        # The firmware currently doesn't use the checksum, so we send a placeholder.
+        return 0
+
+    def _format_command(self, base_command, args):
+        """
+        Constructs the final command string with a unique ID and checksum.
+
+        Args:
+            base_command (str): The starting part of the command (e.g., '$FLOWCTRL,START,').
+            args (list): A list of arguments for the command.
+
+        Returns:
+            str: The fully formatted command string.
+        """
+        com_id = self._generate_com_id()
+
+        if args:
+            # Append arguments to the base command
+            command_part = f"{base_command}{','.join(map(str, args))}"
+        else:
+            # If no args, remove the trailing comma from the base command
+            command_part = base_command[:-1]
+
+        command_body = f"{command_part},{com_id},1"
+        checksum = self._calculate_checksum(command_body)
+        return f"{command_body};\n"
+
+
+
+
+    # ----- Dissolved Oxygen Sensor Methods -----
+    def do_start_stop(self, start=True):
+        """Starts or stops continuous DO sensor readings."""
+        base_command = self.DO_START if start else self.DO_STOP
+        return self._format_command(base_command, [])
+
+
+class MCUResponse(QObject):
+    """
+    Parses responses from the MCU and emits corresponding signals.
+    """
+    # Define signals for different message types.
+    # The payload will be a list of the message arguments.
+    ok_signal = pyqtSignal(list)
+    error_signal = pyqtSignal(list)
+    flow_data_signal = pyqtSignal(list)
+    temp_data_signal = pyqtSignal(list)
+    do_data_signal = pyqtSignal(list)
+    info_signal = pyqtSignal(str)  # For unhandled messages or logs
+
+    # Define the response headers
+    OK = '$OK,'
+    ERROR = '$ERROR,'
+    FLOW = '$FLOW,'
+    TEMP = '$TEMP,'
+    DO = '$DO,'
+
+    def __init__(self):
+        super().__init__()
+
+    def parse(self, message):
+        """
+        Parses a raw message string from the MCU.
+
+        Identifies the message type by its header and emits the
+        appropriate signal with the message payload.
+
+        Args:
+            message (str): The raw string received from the serial port.
+        """
+        try:
+            # Clean up the incoming message
+            message = message.decode('utf-8')  # Ensure it's a string
+            #remove ;\n at the end
+            message = message.strip(';\n')
+            print(message)
+            if not message:
+                return
+
+            if message.startswith(self.FLOW):
+                # Extract payload: timestamp, id1, flow1, id2, flow2, ...
+                payload = message[len(self.FLOW):].strip(';').split(',')
+                self.flow_data_signal.emit(payload)
+            elif message.startswith(self.TEMP):
+                # Extract payload: timestamp, id1, temp1, ...
+                payload = message[len(self.TEMP):].strip(';').split(',')
+                self.temp_data_signal.emit(payload)
+            elif message.startswith(self.DO):
+                # Extract payload: timestamp (int), do1(float), do2(float)
+                payload = message[len(self.DO):].strip(';').split(',')
+                payload = [int(payload[0]), float(payload[1]), float(payload[2])]
+
+                print("DO Payload:", payload)  # Debug print
+                self.do_data_signal.emit(payload)
+            elif message.startswith(self.OK):
+                # Extract payload: com_id, optional messages
+                payload = message[len(self.OK):].strip(';').split(',')
+                self.ok_signal.emit(payload)
+            elif message.startswith(self.ERROR):
+                # Extract payload: com_id, error message
+                payload = message[len(self.ERROR):].strip(';').split(',')
+                self.error_signal.emit(payload)
+            else:
+                # Emit any other messages as general info
+                self.info_signal.emit(message)
+
+        except Exception as e:
+            self.info_signal.emit(f"Error parsing MCU message: '{message}'. Error: {e}")
+
+
+class MCUThread(QThread):
+    # Signals to be connected by the main application
+    flow_data_received = pyqtSignal(list)
+    temp_data_received = pyqtSignal(list)
+    do_data_received = pyqtSignal(list)
+    ack_received = pyqtSignal(list)
+    error_received = pyqtSignal(list)
+    log_signal = pyqtSignal(str)  # For general logging and info
+
+    # Internal signals for thread management
     running_signal = pyqtSignal(bool)
     connected_signal = pyqtSignal(bool)
-    update_all_signal = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
 
         self.connected = False
         self.running = False
-        self.mcu = None  # Initialize the mcu variable
+        self.mcu = None
+        self.commands = MCUCommands()
+        self.parser = MCUResponse()
 
-        # Define the callback functions
-        self.callbacks = {'!kAcknowledge': self.onAcknowledge,
-                            '!kSensors': self.onSensors,
-                          '!kError': self.onError}
+        # Connect the parser's signals to this thread's signals
+        self.parser.flow_data_signal.connect(self.flow_data_received)
+        self.parser.temp_data_signal.connect(self.temp_data_received)
+        self.parser.do_data_signal.connect(self.do_data_received)
+        self.parser.ok_signal.connect(self.ack_received)
+        self.parser.error_signal.connect(self.error_received)
+        self.parser.info_signal.connect(self.log_signal)
 
-        # self._send_methods = {
-        #     's': self._format_string,
-        #     'f': self._format_float,
-        #     'b': self._format_bool,
-        #     'd': self._format_int
-        # }
-
-    # def read_message(self):
-    #     if self.mcu.canReadLine():
-    #         try:
-    #             msg = self.mcu.readLine(maxlen=1000)
-    #             msg_decoded = msg.decode().split(',')
-    #             print('Reading message:'+ msg_decoded[0]+','+msg_decoded[1])
-    #             k = msg_decoded[0]
-    #             arg = msg_decoded[1]
-    #             # Call the corresponding callback function
-    #             callback = self.callbacks.get(k)
-    #             if callback is not None:
-    #                 arg = arg.split(';')[0]
-    #                 callback(arg=arg)
-    #         except ValueError:
-    #             pass
     def read_message(self):
-        if self.mcu.canReadLine():
+        """Reads all available lines from the serial port and parses them."""
+        while self.mcu and self.mcu.canReadLine():
             try:
                 message = self.mcu.readLine(maxlen=1000)
-                message_decoded = message.decode()
-                #print(message_decoded)
-                self.handle_message(message_decoded)
-            except ValueError:
-                pass
-    def handle_message(self, msg):
-        message_parts = msg.split(',')
-        cmd = message_parts[0]
-        #Rest of parts are args
-        args = message_parts[1]
-        #print(args)
-        # Call the corresponding callback function
-        callback = self.callbacks.get(cmd)
-        if callback is not None:
-            callback(args)
+                # Convert QByteArray to Python string
+                self.parser.parse(message)
+            except Exception as e:
+                self.log_signal.emit(f"Serial read error: {e}")
 
     def write_message(self, cmd=None):
-        print('Writing message:'+cmd)
-        if self.connected:
+        """Writes a command string to the serial port."""
+        if self.connected and self.mcu:
+            print('Writing message:' + cmd.strip())
             self.mcu.write(cmd.encode())
-
-
-
-    def start(self):
-        print('mcu_start')
-        if self.connected and (not self.running):
-            self.log_signal.emit('start button clicked')
-            self.mcu.clear()
-            self.command = 'start\n'
-            self.mcu.write(self.command.encode())
-            self.running = True
-            self.running_signal.emit(True)
         else:
-            pass
+            self.log_signal.emit("Cannot send command: MCU not connected.")
 
-    def stop(self):
-        if self.connected and self.running:
-            self.log_signal.emit('Stopping pumps')
-            self.command = 'stop\n'
-            self.mcu.write(self.command.encode())
-            self.running = False
-            self.running_signal.emit(False)
+    # --- Public Slots for GUI Interaction ---
 
-    def connect(self):
-        # Get a list of available COM ports
-        serial_port = QSerialPortInfo()
-        available_ports = serial_port.availablePorts()
-        for port in available_ports:
-            print(port.description())
-            if "USB Serial Device" in port.description():
-                try:
-                    # Establish a connection with the mcu Nano
-                    self.connected = True
-                    self.log_signal.emit(f"Connection to mcu successful on {port.portName()}")
-                    print(port.portName)
-                    self.mcu = QSerialPort(port.portName(), baudRate='BAUD115200')
-                    self.mcu.open(QIODevice.ReadWrite)
-                    self.mcu.clear()
-                    self.mcu.flush()
-                    time.sleep(0.5)
-                    self.mcu.readyRead.connect(self.read_message, Qt.QueuedConnection)
-                    #self.write_message('!kAcknowledge mcuready\r' )
-                    self.connected_signal.emit(True)
-                    #self.update_all_signal.emit(0)
-                    #self.update_all_signal.emit(1)
-                    #self.update_all_signal.emit(2)
-                    #self.update_all_signal.emit(3)
+    def start_stop_controllers(self, start=True):
+        """Public slot to start or stop all controllers."""
+        if self.connected:
+            if start and not self.running:
+                self.log_signal.emit('Start command issued')
+                command_string = self.commands.flow_start_stop(targets=15, start=True)
+                self.write_message(command_string)
+                # You might also want to start temp/DO controllers here
+                self.running = True
+                self.running_signal.emit(True)
+            elif not start and self.running:
+                self.log_signal.emit('Stop command issued')
+                command_string = self.commands.flow_start_stop(targets=15, start=False)
+                self.write_message(command_string)
+                self.running = False
+                self.running_signal.emit(False)
 
+    def connect_mcu(self):
+        """Public slot to initiate a connection to the MCU."""
+        if not self.connected:
+            # ... (rest of the connection logic remains the same)
+            serial_port = QSerialPortInfo()
+            available_ports = serial_port.availablePorts()
+            for port in available_ports:
+                if "USB Serial Device" in port.description():
+                    try:
+                        self.mcu = QSerialPort(port.portName(), baudRate=QSerialPort.Baud115200)
+                        if self.mcu.open(QIODevice.ReadWrite):
+                            self.connected = True
+                            self.log_signal.emit(f"Connection to MCU successful on {port.portName()}")
+                            self.mcu.readyRead.connect(self.read_message)
+                            self.connected_signal.emit(True)
+                            return
+                        else:
+                            self.log_signal.emit(f"Failed to open port {port.portName()}")
 
-                except QSerialPort.OpenError:
-                    self.log_signal.emit(f"Failed to connect to mcu Nano on{port.portName()}")
-                    self.connected_signal.emit(False)
-        if self.mcu == None:
-            self.log_signal.emit(f"No mcu connected")
+                    except Exception as e:
+                        self.log_signal.emit(f"Failed to connect to MCU on {port.portName()}: {e}")
+
+            self.log_signal.emit("No MCU connected")
             self.connected_signal.emit(False)
 
-    def close(self):
+    def disconnect_mcu(self):
+        """Public slot to close the connection to the MCU."""
         if self.mcu:
-            print('disconnect button clicked')
-            self.mcu.clear()
             self.mcu.close()
             self.mcu = None
             self.connected = False
             self.connected_signal.emit(False)
+            self.log_signal.emit("Disconnected from MCU")
 
-    def start_logging(self):
-        print('start logging')
-        ## sends a message to the mcu to reset the data buffer and reset the time
-        self.mcu.clear()
-        self.write_message('!kStartLogging\r')
+    def send_flow_rate(self, targets, flowrates):
+        """Public slot to set flow rates."""
+        try:
+            command = self.commands.flow_set_flowrate(targets, flowrates)
+            self.write_message(command)
+        except ValueError as e:
+            self.log_signal.emit(f"Invalid flow rate command: {e}")
 
-    # Define the callback functions
-
-    def onAcknowledge(self,arg):
-        if arg == "mcu Ready":
-            self.connected_signal.emit(True)
-            self.connected = True
-            self.log_signal.emit(arg)
-        else:
-            self.log_signal.emit(arg)
-
-
-    def onSensors(self,arg):
-        #Cut off the \r\n
-        arg = arg[:-2]
-        #print(arg)
-        self.sensor_signal.emit(arg)
-        pass
-
-    def onError(self,arg):
-        msg = 'Error : '+arg
-        self.log_signal.emit(msg)
-        pass
-    def on_flow_controller_signal(self,msg):
-        #Method to receive signals from syringepump object and dispatch specific callback functions
-        #The method formats th
-        # Split the received message into the command and arguments
-#        msg_parts = msg.split(' ')
- #       cmd = msg_parts[0]
-  #      args = msg_parts[1].split(',')
-
-        # Determine the types of the arguments based on the command
-       # cmd_arg_types = {
-        #    'kSetMode': ['d', 's'],
-         #   'kSetPID': ['d', 'f', 'f', 'f'],
-          ##  'kSetFlowSensor': ['d', 'b'],
-            #'kSetFlowRate': ['d', 'f'],
-           # 'kSetSpeed': ['d', 'f'],
-           # 'kSetDiameter': ['d', 'f']
-            #}
-        #arg_types = cmd_arg_types.get(cmd, ['s' for _ in args])
-
-         # Call the write_message method with the command, arguments, and argument types
-        self.write_message(msg)
-
+    def send_generic_command(self, command_string):
+        """
+        Public slot to send a pre-formatted command string.
+        Useful for simple commands or forwarding from other classes.
+        """
+        self.write_message(command_string)
