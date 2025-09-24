@@ -105,24 +105,23 @@ class MCUResponse(QObject):
             message = message.decode('utf-8')  # Ensure it's a string
             #remove ;\n at the end
             message = message.strip(';\n')
-            print(message)
             if not message:
                 return
 
             if message.startswith(self.FLOW):
                 # Extract payload: timestamp, id1, flow1, id2, flow2, ...
                 payload = message[len(self.FLOW):].strip(';').split(',')
+                print(payload)
                 self.flow_data_signal.emit(payload)
             elif message.startswith(self.TEMP):
                 # Extract payload: timestamp, id1, temp1, ...
                 payload = message[len(self.TEMP):].strip(';').split(',')
+                print(payload)
                 self.temp_data_signal.emit(payload)
             elif message.startswith(self.DO):
                 # Extract payload: timestamp (int), do1(float), do2(float)
                 payload = message[len(self.DO):].strip(';').split(',')
                 payload = [int(payload[0]), float(payload[1]), float(payload[2])]
-
-                print("DO Payload:", payload)  # Debug print
                 self.do_data_signal.emit(payload)
             elif message.startswith(self.OK):
                 # Extract payload: com_id, optional messages
@@ -175,6 +174,7 @@ class MCUThread(QThread):
         while self.mcu and self.mcu.canReadLine():
             try:
                 message = self.mcu.readLine(maxlen=1000)
+                print(f"{message}")
                 # Convert QByteArray to Python string
                 self.parser.parse(message)
             except Exception as e:
@@ -183,7 +183,7 @@ class MCUThread(QThread):
     def write_message(self, cmd=None):
         """Writes a command string to the serial port."""
         if self.connected and self.mcu:
-            print('Writing message:' + cmd.strip())
+            print('Writing message:' + cmd)
             self.mcu.write(cmd.encode())
         else:
             self.log_signal.emit("Cannot send command: MCU not connected.")

@@ -1,3 +1,5 @@
+import time
+
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from mcu_cmd import MCUCommands
 
@@ -119,19 +121,15 @@ class TemperatureControllerThread(QThread):
         else:
             raise ValueError("Invalid temperature controller number.")
         #if any sensor is set to 1, enable continuous reading if not already enabled
-        any_sensor_enabled = any(tc.sensor == 1 for tc in self.temperature_controllers)
+      #  time.sleep(1)
+      #  any_sensor_enabled = any(tc.sensor == 1 for tc in self.temperature_controllers)
 
-        if any_sensor_enabled and not self.continuous_reading:
-            command = self.commands.continuous_read(on=True)
+    def set_continuous_reading(self, enable):
+        if enable != self.continuous_reading:
+            self.continuous_reading = enable
+            command = self.commands.continuous_read(on=enable)
             print(command)
             self.mcu_signal.emit(command)
-            self.continuous_reading = True
-
-        elif not any_sensor_enabled and self.continuous_reading:
-            command = self.commands.continuous_read(on=False)
-            print(command)
-            self.mcu_signal.emit(command)
-            self.continuous_reading = False
 
 class temperature_controller:
     def __init__(self, name, number):

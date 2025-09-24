@@ -154,13 +154,24 @@ class FlowControllerThread(QThread):
 
     def set_sensor(self, flow_controller_index, sensor):
         # Set the sensor of a flow_controller
-        if sensor:
-            self.flow_controllers[flow_controller_index].set_parameters(sensor=sensor)
+
+        self.flow_controllers[flow_controller_index].set_parameters(sensor=sensor)
         target = self.flow_controllers[flow_controller_index].num
         message = self.commands.ssr_enable_disable(target, sensor)
         print(message)
         self.mcu_signal.emit(message)
 
+        any_sensor_enabled = any(fc.sensor == 1 for fc in self.flow_controllers)
+        print(any_sensor_enabled, self.continuous_reading)
+        time.sleep(1)
+        if any_sensor_enabled and not self.continuous_reading:
+            command = self.commands.continuous_read(on=True)
+            self.mcu_signal.emit(command)
+            self.continuous_reading = True
+        elif not any_sensor_enabled and self.continuous_reading:
+            command = self.commands.continuous_read(on=False)
+            self.mcu_signal.emit(command)
+            self.continuous_reading = False
     def set_pid(self, flow_controller_index, Ki=None, Kp=None, Kd=None):
         # Set the PID parameters of a flow_controller
         if Ki:

@@ -50,6 +50,7 @@ class App(QMainWindow, QObject):
     tc_target_temp_change_signal = pyqtSignal(int, float)
     tc_PID_change_signal = pyqtSignal(int, float, float, float)
     tc_sensor_change_signal = pyqtSignal(int, bool)
+    tc_continuous_reading_signal = pyqtSignal( bool)
 
     # DO sensor signals
     do_enable_change_signal = pyqtSignal(int, bool)
@@ -152,8 +153,8 @@ class App(QMainWindow, QObject):
         self.load_sequence_button = QPushButton("Load Sequence")
 
         self.flowrate_plot_widget = PlotWidget()
-        self.oxygen_plot_widget = PlotWidget()
-        self.zo_plot_widget = PlotWidget()
+        self.do_plot_widget = PlotWidget()
+        self.temp_plot_widget = PlotWidget()
         self.log_widget = QTextEdit()
         self.log_widget.setReadOnly(True)
 
@@ -167,8 +168,8 @@ class App(QMainWindow, QObject):
 
         plot_layout = QHBoxLayout()
         plot_layout.addWidget(self.flowrate_plot_widget)
-        plot_layout.addWidget(self.oxygen_plot_widget)
-        plot_layout.addWidget(self.zo_plot_widget)
+        plot_layout.addWidget(self.temp_plot_widget)
+        plot_layout.addWidget(self.do_plot_widget)
 
         main_layout = QGridLayout()
         main_layout.addWidget(flow_controller_group_box, 0, 0, 9, 4)
@@ -320,42 +321,32 @@ class App(QMainWindow, QObject):
         # Plot Aesthetics
         self.flowrate_plot_widget.setLabel('bottom', 'Time', units='s')
         self.flowrate_plot_widget.setLabel('left', 'Flow Rate (µL/min)')
-        self.flowrate_plot_widget.setTitle('Flow Rate')
+        self.flowrate_plot_widget.setTitle('Flow Sensors')
         self.flowrate_plot_widget.addLegend()
-        self.oxygen_plot_widget.addLegend()
-        self.oxygen_plot_widget.setLabel('bottom', 'Time', units='s')
-        self.oxygen_plot_widget.setLabel('left', ' O2 partial pressure', units='mmHg')
-        self.oxygen_plot_widget.setTitle('Oxygen Saturation')
-        self.zo_plot_widget.setLabel('bottom', 'Wavelength', units='nm')
-        self.zo_plot_widget.setLabel('left', 'Intensity', units='A.U.')
-        self.zo_plot_widget.setTitle('Raw spectrum')
-        self.zo_plot_widget.setXRange(450, 800)
-        self.zo_plot_widget.setYRange(0, 65000)
-
-        # Plotting Buffers and Initial Items
-        self.flowrate_buffers = [deque(maxlen=self.flowrate_buffer_length) for _ in range(self.num_flow_controllers)]
-        self.oxygen_buffers = [deque(maxlen=self.oxygen_buffer_length) for _ in range(2)]
-        self.plot_pens = [(255, 255, 102), (139, 203, 149), (51, 204, 204), (0, 102, 255)]
-        for i in range(self.num_flow_controllers):
-            self.flowrate_plot_widget.plot(list(self.flowrate_buffers[i]), pen=self.plot_pens[i],
-                                           name=f'flow_controller {i + 1}')
-        self.oxygen_plot_widget.plot(list(self.oxygen_buffers[0]), pen=(255, 255, 102), name='Retina')
-        self.oxygen_plot_widget.plot(list(self.oxygen_buffers[1]), pen=(139, 203, 149), name='Choroid')
+        self.do_plot_widget.addLegend()
+        self.do_plot_widget.setLabel('bottom', 'Time', units='s')
+        self.do_plot_widget.setLabel('left', ' Raw voltage', units='V')
+        self.do_plot_widget.setTitle('Oxygen Sensors')
+        self.temp_plot_widget.setLabel('bottom', 'Wavelength', units='nm')
+        self.temp_plot_widget.setLabel('left', 'Intensity', units='°C')
+        self.temp_plot_widget.setTitle('Temperature Sensors')
 
     def _init_backend(self):
         """Initializes all backend threads and worker objects."""
         self.mcu_thread = MCUThread()
         self.zo_thread = ZOThread()
         self.sequence_runner = SequenceRunner()
+        self.flow_controllers = FlowControllerThread()
+        self.temp_controllers = TemperatureControllerThread()
+        self.do_sensors = DOSensorThread()
         self.gui_updater = GUIUpdater(self.log_widget,
-                                      self.zo_plot_widget,
+                                      self.do_plot_widget,
+                                      self.temp_plot_widget,
+                                      self.flowrate_plot_widget,
                                       self.connect_button,
                                       self.flow_controllers.flow_controllers,
                                       self.temp_controllers.temperature_controllers,
                                       self.do_sensors.do_sensors)
-        self.flow_controllers = FlowControllerThread()
-        self.temp_controllers = TemperatureControllerThread()
-        self.do_sensors = DOSensorThread()
         self.data_saver = DataSaver()
 
     def _connect_signals(self):
@@ -413,12 +404,11 @@ class App(QMainWindow, QObject):
         self.data_saver_stop_signal.connect(self.data_saver.stop_save)
 
         # Thread Communication Signals
-        self.gui_updater.update_signal.connect(self.update_plot)
         self.mcu_thread.flow_data_received.connect(self.gui_updater.process_sensor_data)
         self.mcu_thread.log_signal.connect(self.gui_updater.update_log)
         self.mcu_thread.connected_signal.connect(self.gui_updater.update_connectdisconnect_button)
         self.mcu_thread.connected_signal.connect(self.update_connected)
-        self.zo_thread.data_signal.connect(self.gui_updater.update_ZO_plot)
+        self.mcu_thread.parser.do_data_signal.connect(self.do_sensors.process_do_serial_data)
 
         # Flow Controller Signals
         self.fc_pump_settings_peristaltic_signal.connect(self.flow_controllers.set_parameters_peristaltic)
@@ -436,12 +426,14 @@ class App(QMainWindow, QObject):
         self.tc_target_temp_change_signal.connect(self.temp_controllers.set_temperature)
         self.tc_PID_change_signal.connect(self.temp_controllers.set_pid)
         self.tc_sensor_change_signal.connect(self.temp_controllers.set_sensor)
+        self.tc_continuous_reading_signal.connect(self.temp_controllers.set_continuous_reading)
         self.temp_controllers.mcu_signal.connect(self.mcu_thread.write_message)
 
         # DO Sensor Signals
         self.do_enable_change_signal.connect(self.do_sensors.do_enable)
         self.do_start_stop_signal.connect(self.do_sensors.do_start_stop)
         self.do_sensors.mcu_signal.connect(self.mcu_thread.write_message)
+        self.do_sensors.update_plot_signal.connect(self.gui_updater.update_do_plot)
 
 
     def _start_services(self):
@@ -478,25 +470,6 @@ class App(QMainWindow, QObject):
             self.mcu_connect_signal.emit()
         else:
             self.mcu_disconnect_signal.emit()
-
-    def update_plot(self, data):
-        """Updates plot data from sensor readings."""
-        data = data.strip().split(',')
-        try:
-            for i in range(self.num_flow_controllers):
-                self.flowrate_buffers[i].append(float(data[i + 1]))
-            self.oxygen_buffers[0].append(float(data[5]))
-            self.oxygen_buffers[1].append(float(data[6]))
-
-            self.flowrate_plot_widget.clear()
-            self.oxygen_plot_widget.clear()
-            for i in range(self.num_flow_controllers):
-                self.flowrate_plot_widget.plot(list(self.flowrate_buffers[i]), pen=self.plot_pens[i],
-                                               name=f'flow_controller {i + 1}')
-            self.oxygen_plot_widget.plot(list(self.oxygen_buffers[0]), pen=(255, 255, 102), name='Retina')
-            self.oxygen_plot_widget.plot(list(self.oxygen_buffers[1]), pen=(0, 204, 102), name='Choroid')
-        except (ValueError, IndexError) as e:
-            self.log_widget.append(f"Error updating plot: {e}")
 
     def fc_enable_onchange(self, fc_index):
         """Enables or disables a flow controller in the controller thread."""
@@ -635,6 +608,7 @@ class App(QMainWindow, QObject):
         try:
             enabled = self.temp_enable_checkboxes[tc_index].isChecked()
             self.tc_enable_change_signal.emit(tc_index, enabled)
+
         except IndexError:
             pass
     def tc_target_temp_onchange(self, tc_index):
@@ -661,6 +635,14 @@ class App(QMainWindow, QObject):
             state = self.temp_sensor_dropdowns[tc_index].currentText()
             is_enabled = (state == 'On')
             self.tc_sensor_change_signal.emit(tc_index, is_enabled)
+
+            any_sensor_enabled = any(tc.sensor for tc in self.temp_controllers.temperature_controllers)
+
+            if any_sensor_enabled and not self.temp_controllers.continuous_reading:
+                self.tc_continuous_reading_signal.emit(True)
+
+            elif not any_sensor_enabled and self.temp_controllers.continuous_reading:
+                self.tc_continuous_reading_signal.emit(False)
         except IndexError:
             pass
 

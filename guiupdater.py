@@ -6,19 +6,36 @@ class GUIUpdater(QThread):
     connected_signal = pyqtSignal(bool)
     recording_signal = pyqtSignal(bool)
 
-    def __init__(self, log_widget, zo_plot_widget,connect_button,flow_controllers_list: list, temp_controllers_list: list, do_sensors_list: list):
+    def __init__(self, log_widget,
+                 do_plot_widget,
+                 temp_plot_widget,
+                 flow_plot_widget,
+                 connect_button,flow_controllers_list: list, temp_controllers_list: list, do_sensors_list: list):
         super().__init__()
         self.log_widget = log_widget
-        self.zo_plot_widget = zo_plot_widget
+        # Plot widgets references
+        self.do_plot_widget = do_plot_widget
+        self.temp_plot_widget = temp_plot_widget
+        self.flow_plot_widget = flow_plot_widget
+
         self.connect_button = connect_button
         self.DO_calibration_coefs = [1, 0, 0 , 0]
         self.avg_n = 20 #number of points to average
         self.flow_controllers = flow_controllers_list
         self.temp_controllers = temp_controllers_list
         self.do_sensors = do_sensors_list
-    def update_ZO_plot(self,data):
-        self.zo_plot_widget.clear()
-        self.zo_plot_widget.plot(list(data[:,0]),list(data[:,1]),pen=(139,203,149))
+        self.do_pen_colors = [(255, 255, 102), (139, 203, 149)]
+        self.flow_pen_colors =  [(255, 255, 102), (139, 203, 149), (51, 204, 204), (0, 102, 255)]
+
+    def update_do_plot(self):
+        self.do_plot_widget.clear()
+        for i, sensor in enumerate(self.do_sensors):
+            if sensor.enabled:
+                self.do_plot_widget.plot(list(sensor.time_buffer), list(sensor.raw_data_buffer), pen=self.do_pen_colors[i], name=sensor.name)
+
+#    def update_ZO_plot(self,data):
+ #       self.zo_plot_widget.clear()
+  #      self.zo_plot_widget.plot(list(data[:,0]),list(data[:,1]),pen=(139,203,149))
     #def update_plot(self, data):
     #    print(data)
     #    data = data.split(',')
