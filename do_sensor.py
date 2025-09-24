@@ -16,6 +16,8 @@ class DOCommands(MCUCommands):
 
     def enable(self,target, enable=True):
         """Enables or disables DO sensor."""
+        # This method seems to be a placeholder; if it needs to send a command,
+        # it should be implemented similarly to the others.
         pass
 
     def info(self):
@@ -27,48 +29,48 @@ class DOCommands(MCUCommands):
         return self._format_command(DOCommands.DO_HELP, [])
 
 
-
 class DOSensorThread(QThread):
-    mcu_signal = pyqtSignal(str)  # Signal to send commands to MCU
+    # Signal now emits the command string and its unique communication ID
+    mcu_signal = pyqtSignal(str, str)
     update_plot_signal = pyqtSignal()  # Signal containing data to be logged and plotted
     commands = DOCommands()
     num_sensors = 2  # Number of DO sensors
     buffer_size = 10000 # Size of the FIFO buffer for each sensor
 
     def __init__(self):
-        super().__init__()  # Call the __init method of the base class
+        super().__init__()
         self.do_sensors = []
         for i in range(self.num_sensors):
             self.do_sensors.append(do_sensor(i+1, f"DO Sensor {i+1}", self.buffer_size))
 
     def do_start_stop(self, start=True):
-        if start:
-            command = self.commands.start_stop(start=True)
-        else:
-            command = self.commands.start_stop(start=False)
-        print(command)
-        self.mcu_signal.emit(command)
+        command, com_id = self.commands.start_stop(start=start)
+        print(f"DO Thread: Queuing command {com_id}")
+        self.mcu_signal.emit(command, com_id)
+
     def do_info(self):
-        command = self.commands.info()
-        self.mcu_signal.emit(command)
+        command, com_id = self.commands.info()
+        print(f"DO Thread: Queuing command {com_id}")
+        self.mcu_signal.emit(command, com_id)
 
     def do_help(self):
-        command = self.commands.help()
-        self.mcu_signal.emit(command)
+        command, com_id = self.commands.help()
+        print(f"DO Thread: Queuing command {com_id}")
+        self.mcu_signal.emit(command, com_id)
 
     def do_enable(self,target_id, enable=True):
+        # This method only changes internal state. It does not send a command.
         self.do_sensors[target_id].set_enable(enable)
 
     def process_do_serial_data(self, data:list):
         # Process the incoming DO sensor data
-        #convert time from ms to seconds
+        # convert time from ms to seconds
         for i, sensor in enumerate(self.do_sensors):
             if sensor.enabled:
                 sensor.add_data((data[0]), (data[i+1]))
         # Emit a signal
         if any(sensor.enabled for sensor in self.do_sensors):
             self.update_plot_signal.emit()
-
 
 
 class do_sensor:

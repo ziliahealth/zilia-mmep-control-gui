@@ -10,7 +10,7 @@ import os
 import functools
 
 # Assuming these are local modules for your project
-from mcu_cmd import MCUThread
+from mcu_cmd import MCUWorker  # Correctly import the MCUWorker
 from zo import ZOThread
 from guiupdater import GUIUpdater
 from flow_controller import FlowControllerThread
@@ -28,9 +28,11 @@ class App(QMainWindow, QObject):
     """
 
     # --- Signals ---
+    # These signals now act as triggers for slots in the worker thread.
     mcu_connect_signal = pyqtSignal()
-    logging_signal = pyqtSignal()
     mcu_disconnect_signal = pyqtSignal()
+
+    logging_signal = pyqtSignal()
     data_saver_stop_signal = pyqtSignal()
 
     # Flow controller signals
@@ -40,17 +42,18 @@ class App(QMainWindow, QObject):
     fc_pump_settings_peristaltic_signal = pyqtSignal(int, float, float)
     fc_pump_settings_syringe_signal = pyqtSignal(int, float, float)
     fc_mode_change_signal = pyqtSignal(int, str)
-    fc_sensor_change_signal = pyqtSignal(int,bool)
-    fc_enable_change_signal = pyqtSignal(int,bool)
+    fc_sensor_change_signal = pyqtSignal(int, bool)
+    fc_enable_change_signal = pyqtSignal(int, bool)
     fc_dispense_signal = pyqtSignal(int, float, float)
     fc_dispense_settings_signal = pyqtSignal(int, float, float)
+    fc_continuous_reading_signal = pyqtSignal(bool)
 
     # Temperature controller signals
     tc_enable_change_signal = pyqtSignal(int, bool)
     tc_target_temp_change_signal = pyqtSignal(int, float)
     tc_PID_change_signal = pyqtSignal(int, float, float, float)
     tc_sensor_change_signal = pyqtSignal(int, bool)
-    tc_continuous_reading_signal = pyqtSignal( bool)
+    tc_continuous_reading_signal = pyqtSignal(bool)
 
     # DO sensor signals
     do_enable_change_signal = pyqtSignal(int, bool)
@@ -97,12 +100,11 @@ class App(QMainWindow, QObject):
         self.proportional_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
         self.integral_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
         self.derivative_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
-        self.diameter_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]  # Changed from QComboBox
+        self.diameter_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
         self.pitch_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
         self.flow_controller_dropdowns = [QComboBox() for _ in range(self.num_flow_controllers)]
         self.sensor_dropdowns = [QComboBox() for _ in range(self.num_flow_controllers)]
 
-        # Labels that change based on pump type
         self.diameter_label = QLabel("Syringe diameter [mm]:")
         self.pitch_label = QLabel("Thread Pitch [mm/rev]:")
 
@@ -210,8 +212,8 @@ class App(QMainWindow, QObject):
         layout.addWidget(QLabel("Proportional (KP)"), 3, 0)
         layout.addWidget(QLabel("Integral (KI):"), 4, 0)
         layout.addWidget(QLabel("Derivative (KD):"), 5, 0)
-        layout.addWidget(self.diameter_label, 6, 0)  # Use instance label
-        layout.addWidget(self.pitch_label, 7, 0)  # Use instance label
+        layout.addWidget(self.diameter_label, 6, 0)
+        layout.addWidget(self.pitch_label, 7, 0)
         layout.addWidget(QLabel("Mode:"), 8, 0)
         layout.addWidget(QLabel("Sensor:"), 9, 0)
 
@@ -223,7 +225,7 @@ class App(QMainWindow, QObject):
             layout.addWidget(self.proportional_inputs[i], 3, col)
             layout.addWidget(self.integral_inputs[i], 4, col)
             layout.addWidget(self.derivative_inputs[i], 5, col)
-            layout.addWidget(self.diameter_inputs[i], 6, col)  # Use QLineEdit
+            layout.addWidget(self.diameter_inputs[i], 6, col)
             layout.addWidget(self.pitch_inputs[i], 7, col)
             layout.addWidget(self.flow_controller_dropdowns[i], 8, col)
             layout.addWidget(self.sensor_dropdowns[i], 9, col)
@@ -318,7 +320,6 @@ class App(QMainWindow, QObject):
 
     def _setup_plots(self):
         """Configures the aesthetics and data structures for the plots."""
-        # Plot Aesthetics
         self.flowrate_plot_widget.setLabel('bottom', 'Time', units='s')
         self.flowrate_plot_widget.setLabel('left', 'Flow Rate (µL/min)')
         self.flowrate_plot_widget.setTitle('Flow Sensors')
@@ -333,7 +334,13 @@ class App(QMainWindow, QObject):
 
     def _init_backend(self):
         """Initializes all backend threads and worker objects."""
-        self.mcu_thread = MCUThread()
+        # --- Worker-Object Threading Pattern ---
+        self.mcu_thread = QThread()
+        self.mcu_thread.setObjectName("MCU_Thread")
+        self.mcu_worker = MCUWorker()
+        self.mcu_worker.moveToThread(self.mcu_thread)
+        # ---
+
         self.zo_thread = ZOThread()
         self.sequence_runner = SequenceRunner()
         self.flow_controllers = FlowControllerThread()
@@ -365,22 +372,19 @@ class App(QMainWindow, QObject):
             self.proportional_inputs[i].textChanged.connect(
                 functools.partial(self.fc_PID_input_onchange, i, 'proportional'))
             self.integral_inputs[i].textChanged.connect(functools.partial(self.fc_PID_input_onchange, i, 'integral'))
-            self.derivative_inputs[i].textChanged.connect(functools.partial(self.fc_PID_input_onchange, i, 'derivative'))
+            self.derivative_inputs[i].textChanged.connect(
+                functools.partial(self.fc_PID_input_onchange, i, 'derivative'))
             self.flow_controller_dropdowns[i].currentTextChanged.connect(functools.partial(self.fc_mode_on_change, i))
             self.sensor_dropdowns[i].currentTextChanged.connect(functools.partial(self.fc_sensor_on_change, i))
             self.pump_type_dropdowns[i].currentTextChanged.connect(functools.partial(self.fc_pump_type_onchange, i))
-            self.diameter_inputs[i].textChanged.connect(
-                functools.partial(self.fc_pump_parameter_input_onchange, i))
-            self.pitch_inputs[i].textChanged.connect(
-                functools.partial(self.fc_pump_parameter_input_onchange, i))
+            self.diameter_inputs[i].textChanged.connect(functools.partial(self.fc_pump_parameter_input_onchange, i))
+            self.pitch_inputs[i].textChanged.connect(functools.partial(self.fc_pump_parameter_input_onchange, i))
             self.fc_control_enable[i].stateChanged.connect(functools.partial(self.fc_enable_onchange, i))
-            self.fc_control_dispense_buttons[i].clicked.connect(
-                functools.partial(self.fc_dispense_onclick, i))
+            self.fc_control_dispense_buttons[i].clicked.connect(functools.partial(self.fc_dispense_onclick, i))
 
         # Temperature Controller Inputs
         for i in range(self.num_temp_controllers):
-            self.target_temp_inputs[i].textChanged.connect(
-                functools.partial(self.tc_target_temp_onchange, i))
+            self.target_temp_inputs[i].textChanged.connect(functools.partial(self.tc_target_temp_onchange, i))
             self.temp_proportional_inputs[i].textChanged.connect(
                 functools.partial(self.tc_PID_input_onchange, i, 'proportional'))
             self.temp_integral_inputs[i].textChanged.connect(
@@ -398,19 +402,21 @@ class App(QMainWindow, QObject):
         self.do_sensor_fluid_dropdown.currentTextChanged.connect(self.do_fluid_onchange)
         self.do_sensor_units_dropdown.currentTextChanged.connect(self.do_units_onchange)
 
+        # --- Corrected MCU Connections ---
         # Internal Application Signals
-        self.mcu_connect_signal.connect(self.mcu_thread.connect_mcu)
-        self.mcu_disconnect_signal.connect(self.mcu_thread.disconnect_mcu, Qt.DirectConnection)
+        self.mcu_connect_signal.connect(self.mcu_worker.connect_mcu)
+        self.mcu_disconnect_signal.connect(self.mcu_worker.disconnect_mcu)
         self.data_saver_stop_signal.connect(self.data_saver.stop_save)
 
-        # Thread Communication Signals
-        self.mcu_thread.flow_data_received.connect(self.gui_updater.process_sensor_data)
-        self.mcu_thread.log_signal.connect(self.gui_updater.update_log)
-        self.mcu_thread.connected_signal.connect(self.gui_updater.update_connectdisconnect_button)
-        self.mcu_thread.connected_signal.connect(self.update_connected)
-        self.mcu_thread.parser.do_data_signal.connect(self.do_sensors.process_do_serial_data)
+        # Thread Communication Signals (from worker to GUI)
+        self.mcu_worker.log_signal.connect(self.gui_updater.update_log)
+        self.mcu_worker.connected_signal.connect(self.gui_updater.update_connectdisconnect_button)
+        self.mcu_worker.connected_signal.connect(self.update_connected)
+        self.mcu_worker.parser.do_data_signal.connect(self.do_sensors.process_do_serial_data)
+        self.mcu_worker.parser.temp_data_signal.connect(self.temp_controllers.process_temp_serial_data)
+        self.mcu_worker.parser.flow_data_signal.connect(self.flow_controllers.process_flow_serial_data)
 
-        # Flow Controller Signals
+        # Flow Controller Signals (from GUI to worker)
         self.fc_pump_settings_peristaltic_signal.connect(self.flow_controllers.set_parameters_peristaltic)
         self.fc_pump_settings_syringe_signal.connect(self.flow_controllers.set_parameters_syringe)
         self.fc_dispense_signal.connect(self.flow_controllers.start_dispense)
@@ -419,22 +425,25 @@ class App(QMainWindow, QObject):
         self.fc_flowrate_change_signal.connect(self.flow_controllers.set_flowrate)
         self.fc_mode_change_signal.connect(self.flow_controllers.set_mode)
         self.fc_sensor_change_signal.connect(self.flow_controllers.set_sensor)
-        self.flow_controllers.mcu_signal.connect(self.mcu_thread.write_message)
+        self.fc_continuous_reading_signal.connect(self.flow_controllers.set_continuous_reading)
+        self.flow_controllers.mcu_signal.connect(self.mcu_worker.submit_command)
+        self.flow_controllers.update_plot_signal.connect(self.gui_updater.update_flow_plot)
 
-        # Temperature Controller Signals
+        # Temperature Controller Signals (from GUI to worker)
         self.tc_enable_change_signal.connect(self.temp_controllers.set_enable)
         self.tc_target_temp_change_signal.connect(self.temp_controllers.set_temperature)
         self.tc_PID_change_signal.connect(self.temp_controllers.set_pid)
         self.tc_sensor_change_signal.connect(self.temp_controllers.set_sensor)
         self.tc_continuous_reading_signal.connect(self.temp_controllers.set_continuous_reading)
-        self.temp_controllers.mcu_signal.connect(self.mcu_thread.write_message)
+        self.temp_controllers.mcu_signal.connect(self.mcu_worker.submit_command)
+        self.temp_controllers.update_plot_signal.connect(self.gui_updater.update_temp_plot)
 
-        # DO Sensor Signals
+        # DO Sensor Signals (from GUI to worker)
         self.do_enable_change_signal.connect(self.do_sensors.do_enable)
         self.do_start_stop_signal.connect(self.do_sensors.do_start_stop)
-        self.do_sensors.mcu_signal.connect(self.mcu_thread.write_message)
+        self.do_sensors.mcu_signal.connect(self.mcu_worker.submit_command)
         self.do_sensors.update_plot_signal.connect(self.gui_updater.update_do_plot)
-
+        # ---
 
     def _start_services(self):
         """Loads the default configuration and starts all background threads."""
@@ -452,13 +461,10 @@ class App(QMainWindow, QObject):
         self.do_sensors.start()
         self.sequence_runner.start()
 
-    # --- Public Methods / Slots ---
-
     def open_calibration_window(self):
         """Opens the DO sensor calibration window."""
         calibration_dialog = CalibrationWindow(self)
         result = calibration_dialog.exec_()
-
         if result == QDialog.Accepted:
             self.log_widget.append("Calibration Accepted.")
         else:
@@ -472,14 +478,13 @@ class App(QMainWindow, QObject):
             self.mcu_disconnect_signal.emit()
 
     def fc_enable_onchange(self, fc_index):
-        """Enables or disables a flow controller in the controller thread."""
         try:
             enabled = self.fc_control_enable[fc_index].isChecked()
             self.fc_enable_change_signal.emit(fc_index, enabled)
         except IndexError:
             pass
+
     def fc_flowrate_onchange(self, fc_index):
-        """Updates flow rate in the controller thread."""
         try:
             flowrate = float(self.flow_rate_inputs[fc_index].text())
             self.fc_flowrate_change_signal.emit(fc_index, flowrate)
@@ -487,30 +492,24 @@ class App(QMainWindow, QObject):
             pass
 
     def fc_dispense_onclick(self, fc_index):
-        """Handles the dispense button click for a flow controller."""
         try:
             volume = float(self.fc_control_volume_inputs[fc_index].text())
             rate = float(self.fc_control_rate_inputs[fc_index].text())
-            # assert volume > 0 and rate > 0, "Volume and rate must be positive numbers."
             if volume <= 0 or rate <= 0:
-                self.log_widget.append(f"Error: Volume and rate must be positive numbers for Flow Controller {fc_index + 1}.")
+                self.log_widget.append(
+                    f"Error: Volume and rate must be positive numbers for Flow Controller {fc_index + 1}.")
                 return
             self.fc_dispense_signal.emit(fc_index, volume, rate)
         except (ValueError, IndexError):
             pass
 
     def fc_pump_type_onchange(self, fc_index):
-        """Updates pump type in the controller thread and adjusts the UI accordingly."""
         try:
             pump_type = self.pump_type_dropdowns[fc_index].currentText()
             self.flow_controllers.set_pump_type(fc_index, pump_type)
-
             fc = self.flow_controllers.flow_controllers[fc_index]
-
-            # Block signals to prevent onchange handlers from firing when we set text
             self.diameter_inputs[fc_index].blockSignals(True)
             self.pitch_inputs[fc_index].blockSignals(True)
-
             if pump_type == 'Syringe':
                 self.diameter_label.setText("Syringe diameter [mm]:")
                 self.pitch_label.setText("Thread Pitch [mm/rev]:")
@@ -534,34 +533,25 @@ class App(QMainWindow, QObject):
                 self.pitch_inputs[fc_index].clear()
                 self.diameter_inputs[fc_index].setEnabled(False)
                 self.pitch_inputs[fc_index].setEnabled(False)
-
-
         finally:
             self.diameter_inputs[fc_index].blockSignals(False)
             self.pitch_inputs[fc_index].blockSignals(False)
 
     def fc_pump_parameter_input_onchange(self, fc_index):
-        """
-        Handles text changes for diameter/pitch inputs and calls the correct
-        controller method based on the current pump type.
-        """
         pump_type = self.pump_type_dropdowns[fc_index].currentText()
         try:
             if pump_type == 'Syringe':
                 diameter = float(self.diameter_inputs[fc_index].text())
                 pitch = float(self.pitch_inputs[fc_index].text())
                 self.fc_pump_settings_syringe_signal.emit(fc_index, diameter, pitch)
-
             elif pump_type == 'Peristaltic':
                 diameter = float(self.diameter_inputs[fc_index].text())
                 calibration = float(self.pitch_inputs[fc_index].text())
                 self.fc_pump_settings_peristaltic_signal.emit(fc_index, diameter, calibration)
         except (ValueError, IndexError):
-            # Ignore errors from invalid float conversion, which happens during typing
             pass
 
     def fc_PID_input_onchange(self, fc_index, parameter):
-        """Updates PID parameters in the controller thread."""
         try:
             kp = float(self.proportional_inputs[fc_index].text())
             ki = float(self.integral_inputs[fc_index].text())
@@ -569,9 +559,8 @@ class App(QMainWindow, QObject):
             self.fc_PID_change_signal.emit(fc_index, kp, ki, kd)
         except (ValueError, IndexError):
             pass
-        
+
     def fc_mode_on_change(self, fc_index):
-        """Enables/disables PID input fields based on the selected mode."""
         try:
             mode = self.flow_controller_dropdowns[fc_index].currentText()
             pid_inputs = [self.proportional_inputs[fc_index], self.integral_inputs[fc_index],
@@ -585,7 +574,6 @@ class App(QMainWindow, QObject):
             pass
 
     def fc_sensor_on_change(self, fc_index):
-        """Adds or removes the 'PID' option based on sensor state."""
         try:
             state = self.sensor_dropdowns[fc_index].currentText()
             dropdown = self.flow_controller_dropdowns[fc_index]
@@ -600,19 +588,23 @@ class App(QMainWindow, QObject):
                     if dropdown.currentText() == 'PID':
                         dropdown.setCurrentText('Constant')
                     dropdown.removeItem(dropdown.findText('PID'))
+
+            any_sensor_enabled = any(fc.sensor for fc in self.flow_controllers.flow_controllers)
+            if any_sensor_enabled and not self.flow_controllers.continuous_reading:
+                self.fc_continuous_reading_signal.emit(True)
+            elif not any_sensor_enabled and self.flow_controllers.continuous_reading:
+                self.fc_continuous_reading_signal.emit(False)
         except IndexError:
             pass
 
     def tc_enable_onchange(self, tc_index):
-        """Enables or disables a temperature controller in the controller thread."""
         try:
             enabled = self.temp_enable_checkboxes[tc_index].isChecked()
             self.tc_enable_change_signal.emit(tc_index, enabled)
-
         except IndexError:
             pass
+
     def tc_target_temp_onchange(self, tc_index):
-        """Updates target temperature in the controller thread."""
         try:
             target_temp = float(self.target_temp_inputs[tc_index].text())
             self.tc_target_temp_change_signal.emit(tc_index, target_temp)
@@ -620,7 +612,6 @@ class App(QMainWindow, QObject):
             pass
 
     def tc_PID_input_onchange(self, tc_index, parameter):
-        """Updates PID parameters in the temperature controller thread."""
         try:
             kp = float(self.temp_proportional_inputs[tc_index].text())
             ki = float(self.temp_integral_inputs[tc_index].text())
@@ -630,24 +621,19 @@ class App(QMainWindow, QObject):
             pass
 
     def tc_sensor_on_change(self, tc_index):
-        """Enables or disables the temperature sensor in the controller thread."""
         try:
             state = self.temp_sensor_dropdowns[tc_index].currentText()
             is_enabled = (state == 'On')
             self.tc_sensor_change_signal.emit(tc_index, is_enabled)
-
             any_sensor_enabled = any(tc.sensor for tc in self.temp_controllers.temperature_controllers)
-
             if any_sensor_enabled and not self.temp_controllers.continuous_reading:
                 self.tc_continuous_reading_signal.emit(True)
-
             elif not any_sensor_enabled and self.temp_controllers.continuous_reading:
                 self.tc_continuous_reading_signal.emit(False)
         except IndexError:
             pass
 
     def do_start_stop_onclick(self):
-        """Handles the DO sensor start/stop button click."""
         if self.do_sensor_start_button.text() == "Start DO Reading":
             self.do_sensor_start_button.setText("Stop DO Reading")
             self.do_start_stop_signal.emit(True)
@@ -656,7 +642,6 @@ class App(QMainWindow, QObject):
             self.do_start_stop_signal.emit(False)
 
     def do_enable_onchange(self, sensor_index):
-        """Enables or disables a DO sensor in the controller thread."""
         try:
             enabled = self.do_sensor_enables_checkboxes[sensor_index].isChecked()
             self.do_enable_change_signal.emit(sensor_index, enabled)
@@ -664,17 +649,15 @@ class App(QMainWindow, QObject):
             pass
 
     def do_fluid_onchange(self):
-        """Updates the fluid type in the DO sensor thread."""
         pass
+
     def do_units_onchange(self):
-        """Updates the units in the DO sensor thread."""
         pass
+
     def update_connected(self, is_connected):
-        """Updates the internal 'connected' state flag."""
         self.connected = is_connected
 
     def load_config(self, file_path):
-        """Loads configuration from an INI file and updates the UI."""
         if not os.path.exists(file_path):
             self.log_widget.append(f"Configuration file not found: {file_path}")
             return
@@ -684,11 +667,8 @@ class App(QMainWindow, QObject):
         for i in range(self.num_flow_controllers):
             section = f'Flow Controller {i + 1}'
             if not config.has_section(section): continue
-
-            # Set pump type first to ensure UI updates correctly
             pump_type = config.get(section, 'PumpType', fallback='Syringe')
             self.pump_type_dropdowns[i].setCurrentText(pump_type)
-
             self.flow_rate_inputs[i].setText(config.get(section, 'FlowRate', fallback='0'))
             self.proportional_inputs[i].setText(config.get(section, 'KP', fallback='0'))
             self.integral_inputs[i].setText(config.get(section, 'KI', fallback='0'))
@@ -696,8 +676,6 @@ class App(QMainWindow, QObject):
             self.flow_controller_dropdowns[i].setCurrentText(
                 config.get(section, 'Mode', fallback='Constant').capitalize())
             self.sensor_dropdowns[i].setCurrentText(config.get(section, 'Sensor', fallback='Off').capitalize())
-
-            # Manually set the text for diameter/pitch after pump type is set
             fc = self.flow_controllers.flow_controllers[i]
             if fc.pump_type == 'Syringe':
                 self.diameter_inputs[i].setText(config.get(section, 'SyringeDiameter', fallback=str(fc.diameter)))
@@ -708,59 +686,48 @@ class App(QMainWindow, QObject):
                     config.get(section, 'CalibrationFactor', fallback=str(fc.peristaltic_calibration)))
 
     def load_config_button_onclick(self):
-        """Opens a file dialog to load a configuration."""
         file_path, _ = QFileDialog.getOpenFileName(self, 'Load Configuration File', '', 'INI Files (*.ini)')
         if file_path:
             self.load_config(file_path)
 
     def sequence_onclick(self):
-        """Handles loading and stopping a sequence file."""
-        is_running_sequence = self.load_sequence_button.text() == "Stop"
-        if is_running_sequence:
+        if self.load_sequence_button.text() == "Stop":
             self.load_sequence_button.setText("Load Sequence")
-            # Re-enable controls if needed
         elif self.connected:
             sequence_file, _ = QFileDialog.getOpenFileName(self, 'Load Sequence File', '', 'JSON Files (*.json)')
             if sequence_file:
                 self.sequence_runner.load_sequence(sequence_file)
                 self.load_sequence_button.setText("Stop")
-                # Disable controls if needed
         else:
             self.gui_updater.update_log('Please connect to the MCU before starting a sequence')
 
     def save_config_button_onclick(self):
-        """Saves the current UI configuration to an INI file."""
         file_path, _ = QFileDialog.getSaveFileName(self, 'Save Configuration File', '', 'INI Files (*.ini)')
         if not file_path: return
         config = configparser.ConfigParser()
         for i in range(self.num_flow_controllers):
             section = f'Flow Controller {i + 1}'
             config.add_section(section)
-
             fc = self.flow_controllers.flow_controllers[i]
             pump_type = fc.pump_type
             config.set(section, 'PumpType', pump_type)
-
             config.set(section, 'FlowRate', self.flow_rate_inputs[i].text())
             config.set(section, 'KP', self.proportional_inputs[i].text())
             config.set(section, 'KI', self.integral_inputs[i].text())
             config.set(section, 'KD', self.derivative_inputs[i].text())
             config.set(section, 'Mode', self.flow_controller_dropdowns[i].currentText())
             config.set(section, 'Sensor', self.sensor_dropdowns[i].currentText())
-
             if pump_type == 'Syringe':
                 config.set(section, 'SyringeDiameter', self.diameter_inputs[i].text())
                 config.set(section, 'ThreadPitch', self.pitch_inputs[i].text())
             elif pump_type == 'Peristaltic':
                 config.set(section, 'TubeDiameter', self.diameter_inputs[i].text())
                 config.set(section, 'CalibrationFactor', self.pitch_inputs[i].text())
-
         with open(file_path, 'w') as config_file:
             config.write(config_file)
         self.log_widget.append(f"Configuration saved to {file_path}")
 
     def save_data_button_onclick(self):
-        """Handles starting and stopping data logging."""
         if not self.recording:
             filepath, _ = QFileDialog.getSaveFileName(self, 'Save Data', '', 'CSV Files (*.csv)')
             if filepath:
@@ -769,12 +736,24 @@ class App(QMainWindow, QObject):
                 self.data_saver.start_save()
                 self.recording = True
                 self.save_data_button.setText('Stop Recording')
-                self.mcu_thread.sensor_signal.connect(self.data_saver.save_data)
+                self.mcu_worker.sensor_signal.connect(self.data_saver.save_data)  # connect to worker's signal
         else:
             self.recording = False
             self.save_data_button.setText('Log Data')
             self.data_saver_stop_signal.emit()
-            self.mcu_thread.sensor_signal.disconnect(self.data_saver.save_data)
+            if self.mcu_worker.sensor_signal:  # Check if signal exists before disconnecting
+                self.mcu_worker.sensor_signal.disconnect(self.data_saver.save_data)
+
+    def closeEvent(self, event):
+        """Ensure threads are stopped cleanly on application close."""
+        print("Closing application...")
+        self.mcu_disconnect_signal.emit()  # Ensure MCU is disconnected
+        self.mcu_thread.quit()
+        if not self.mcu_thread.wait(3000):  # Wait up to 3 seconds
+            print("MCU thread did not terminate, forcing it.")
+            self.mcu_thread.terminate()
+        # You should add similar shutdown logic for your other threads.
+        event.accept()
 
 
 # Application entry point

@@ -2,6 +2,7 @@ import time
 
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from mcu_cmd import MCUCommands
+from collections import deque
 
 
 class TemperatureControllerCommands(MCUCommands):
@@ -61,9 +62,10 @@ class TemperatureControllerCommands(MCUCommands):
         return self._format_command(base_command, [])
 
 
-
 class TemperatureControllerThread(QThread):
-    mcu_signal = pyqtSignal(str)
+    # Signal now emits the command string and its unique communication ID
+    mcu_signal = pyqtSignal(str, str)
+    update_plot_signal = pyqtSignal()  # Signal containing data to be logged and plotted
     commands = TemperatureControllerCommands()
 
     def __init__(self):
@@ -79,57 +81,77 @@ class TemperatureControllerThread(QThread):
         if self.temperature_controllers[temp_controller_num].temperature_limits[0] <= temperature <= self.temperature_controllers[temp_controller_num].temperature_limits[1]:
             #to implement: clamp displayed temperature to limits
             pass
-        if 0 <= temp_controller_num < 3:
+        if 0 <= temp_controller_num < self.num_temp_controllers:
             self.temperature_controllers[temp_controller_num].set_temperature(temperature)
             target = self.temperature_controllers[temp_controller_num].num
-            command = self.commands.temp_set_temp(target, self.temperature_controllers[temp_controller_num].temperature)
-            print(command)
-            self.mcu_signal.emit(command)
+            command, com_id = self.commands.temp_set_temp(target, self.temperature_controllers[temp_controller_num].temperature)
+            print(f"TC Thread: Queuing command {com_id}")
+            self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
 
     def set_enable(self, temp_controller_num, enable):
-        if 0 <= temp_controller_num < 3:
+        if 0 <= temp_controller_num < self.num_temp_controllers:
             self.temperature_controllers[temp_controller_num].set_enable(enable)
             target = self.temperature_controllers[temp_controller_num].num
-            command = self.commands.temp_start_stop(target, enable)
-            print(command)
-            self.mcu_signal.emit(command)
+            command, com_id = self.commands.temp_start_stop(target, enable)
+            print(f"TC Thread: Queuing command {com_id}")
+            self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
 
     def set_pid(self, temp_controller_num, kp=None, ki=None, kd=None):
-        if 0 <= temp_controller_num < 3:
+        if 0 <= temp_controller_num < self.num_temp_controllers:
             self.temperature_controllers[temp_controller_num].set_pid(kp, ki, kd)
             target = self.temperature_controllers[temp_controller_num].num
-            command = self.commands.temp_set_pid(target,
+            command, com_id = self.commands.temp_set_pid(target,
                                                 self.temperature_controllers[temp_controller_num].kp,
                                                 self.temperature_controllers[temp_controller_num].ki,
                                                 self.temperature_controllers[temp_controller_num].kd)
-            print(command)
-            self.mcu_signal.emit(command)
+            print(f"TC Thread: Queuing command {com_id}")
+            self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
 
     def set_sensor(self, temp_controller_num, sensor):
-        if 0 <= temp_controller_num < 3:
+        if 0 <= temp_controller_num < self.num_temp_controllers:
             self.temperature_controllers[temp_controller_num].set_sensor(sensor)
             target = self.temperature_controllers[temp_controller_num].num
-            command = self.commands.temp_ssr_enable_disable(target, sensor == 1)
-            print(command)
-            self.mcu_signal.emit(command)
+            command, com_id = self.commands.temp_ssr_enable_disable(target, sensor)
+            print(f"TC Thread: Queuing command {com_id}")
+            self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
-        #if any sensor is set to 1, enable continuous reading if not already enabled
-      #  time.sleep(1)
-      #  any_sensor_enabled = any(tc.sensor == 1 for tc in self.temperature_controllers)
 
     def set_continuous_reading(self, enable):
         if enable != self.continuous_reading:
             self.continuous_reading = enable
-            command = self.commands.continuous_read(on=enable)
-            print(command)
-            self.mcu_signal.emit(command)
+            command, com_id = self.commands.continuous_read(on=enable)
+            print(f"TC Thread: Queuing command {com_id}")
+            self.mcu_signal.emit(command, com_id)
+
+    def process_temp_serial_data(self, data: list):
+        # Process the incoming temperature controller data
+        # Data format: [time_ms, index_1, temp_1, duty_1, ...] depending on number of controllers that are enabled
+        # parse data into two lists for each controller
+
+        # Ex
+        #get the indexes of the enabled controllers from data
+        data_length = len(data)
+        num_controllers_in_data = (data_length - 1) // 3
+        new_data = False
+        for i in range(num_controllers_in_data):
+            index = data[1 + i * 3]
+            temp = data[2 + i * 3]
+            duty = data[3 + i * 3]
+            for controller in self.temperature_controllers:
+                if controller.num == index and controller.sensor:
+                    new_data = True
+                    controller.add_data(data[0], temp)
+                    controller.current_dutycycle_percent = (duty / controller.max_dutycycle) * 100.0
+                    break
+        if new_data:
+            self.update_plot_signal.emit()
 
 class temperature_controller:
     def __init__(self, name, number):
@@ -142,6 +164,10 @@ class temperature_controller:
         self.ki = 0.0
         self.kd = 0.0
         self.max_dutycycle = 65535  # max heater duty cycle
+        self.current_dutycycle_percent = 0
+        self.buffer_size = 10000
+        self.temp_buffer = deque(maxlen=self.buffer_size)
+        self.time_buffer = deque(maxlen=self.buffer_size)
         self.temperature_limits = (0, 40.0)  # min and max temperature limits
 
     def set_enable(self, enable):
@@ -160,3 +186,10 @@ class temperature_controller:
             self.kp = kp
         if kd:
             self.kd = kd
+
+    def ms_to_elaspsed_seconds(self, ms):
+        return ms / 1000.0
+
+    def add_data(self, time_ms: int, temperature: float):
+        self.time_buffer.append(self.ms_to_elaspsed_seconds(time_ms))
+        self.temp_buffer.append(temperature)

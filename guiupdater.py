@@ -25,6 +25,7 @@ class GUIUpdater(QThread):
         self.temp_controllers = temp_controllers_list
         self.do_sensors = do_sensors_list
         self.do_pen_colors = [(255, 255, 102), (139, 203, 149)]
+        self.temp_pen_colors = [(255, 255, 102), (139, 203, 149)]
         self.flow_pen_colors =  [(255, 255, 102), (139, 203, 149), (51, 204, 204), (0, 102, 255)]
 
     def update_do_plot(self):
@@ -33,46 +34,18 @@ class GUIUpdater(QThread):
             if sensor.enabled:
                 self.do_plot_widget.plot(list(sensor.time_buffer), list(sensor.raw_data_buffer), pen=self.do_pen_colors[i], name=sensor.name)
 
-#    def update_ZO_plot(self,data):
- #       self.zo_plot_widget.clear()
-  #      self.zo_plot_widget.plot(list(data[:,0]),list(data[:,1]),pen=(139,203,149))
-    #def update_plot(self, data):
-    #    print(data)
-    #    data = data.split(',')
-    #    self.flowrate1_buffer.append(data[0])
-    #    self.flowrate1_buffer.append(data[1])
-    #    self.flowrate3_buffer.append(data[2])
-    #    self.flowrate4_buffer.append(data[3])
+    def update_temp_plot(self):
+        self.temp_plot_widget.clear()
+        for i,controller in enumerate(self.temp_controllers):
+            if controller.sensor:
+                self.temp_plot_widget.plot(list(controller.time_buffer), list(controller.temp_buffer), pen=self.temp_pen_colors[i], name=controller.name)
 
-    def process_sensor_data(self, data):
-        # Process the incoming sensor data
-        data = data.split(';')
-        print(data)
-        #Apply calibration to DO sensor data
-        data[5] = float(data[5])*self.DO_calibration_coefs[0]+self.DO_calibration_coefs[1]
-        data[6] = float(data[6])*self.DO_calibration_coefs[0]+self.DO_calibration_coefs[1]
-        #update fifo buffer
-        self.DO1Buffer.append(data[5])
-        self.DO2Buffer.append(data[6])
-        if len(self.DO1Buffer) > self.avg_n:
-            self.DO1Buffer.pop(0)
-            self.DO2Buffer.pop(0)
-        data[5] = sum(self.DO1Buffer)/len(self.DO1Buffer)
-        data[6] = sum(self.DO2Buffer)/len(self.DO2Buffer)
 
-        #Convert miliseconds to seconds
-        data[0]  = float(data[0])/1000
-        #format the data to message to be sent to the GUI
-        message = '{:.3f}'.format(data[0])+','+data[1]+','+data[2]+','+data[3]+','+data[4]+','+'{:.3f}'.format(data[5])
-        message = message + ',' + '{:.3f}'.format(data[6])
-        self.update_signal.emit(message)
-        # Update the pyqtgraph plot with the latest 1000 points from the buffer
-     #   self.plot_widget.clear()
-     #   self.plot_widget.plot(list(self.flowrate1_buffer), pen=(255, 0, 0))
-     #   self.plot_widget.plot(list(self.flowrate2_buffer), pen=(255, 0, 0))
-     #   self.plot_widget.plot(list(self.flowrate3_buffer), pen=(255, 0, 0))
-     #   self.plot_widget.plot(list(self.flowrate4_buffer), pen=(255, 0, 0))
-
+    def update_flow_plot(self):
+        self.flow_plot_widget.clear()
+        for i, controller in enumerate(self.flow_controllers):
+            if controller.sensor:
+                self.flow_plot_widget.plot(list(controller.time_buffer), list(controller.flow_buffer), pen=self.flow_pen_colors[i], name=controller.name)
     def update_log(self, message):
         current_time = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
         # Update the log widget with the new message
