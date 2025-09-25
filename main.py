@@ -1,1005 +1,988 @@
 # Import necessary libraries
 from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QLineEdit, QPushButton, QVBoxLayout, QHBoxLayout, \
-    QWidget, QGridLayout, QTextEdit, QCheckBox, QFileDialog, QComboBox
-from pyqtgraph import PlotWidget, TextItem
-from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QDateTime, QIODevice, QTimer
-from PyQt5.QtSerialPort import QSerialPort, QSerialPortInfo
+    QWidget, QGridLayout, QTextEdit, QFileDialog, QComboBox, QGroupBox, QCheckBox, QDialog
 from PyQt5.QtGui import QPixmap
-# import serial
-# from serial.tools import list_ports
-from collections import deque
+from pyqtgraph import PlotWidget
+from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QMetaObject
 import configparser
-import os as os
-
-import numpy as np
-from arduino_CMD import ArduinoThread
-from zo import ZOThread
+import os
+import functools
+from mcu import MCUWorker
 from guiupdater import GUIUpdater
-from syringepump import SyringePumps
+from flow_controller import FlowControllerThread
+from temperature_controller import TemperatureControllerThread
+from do_sensor import DOSensorThread
 from datasaver import DataSaver
 from sequencerunner import SequenceRunner
+from calibration_window import CalibrationWindow
 
 
-# ...
-# Define the main application window
-class SyringePumpApp(QMainWindow, QObject):
-    arduino_start_signal = pyqtSignal()
-    arduino_stop_signal = pyqtSignal()
-    arduino_connect_signal = pyqtSignal()
-    arduino_logging_signal = pyqtSignal()
-    arduino_disconnect_signal = pyqtSignal()
-    arduino_flowrate_change_signal = pyqtSignal()
+class App(QMainWindow, QObject):
+    """
+    The main application window for the Zilia MMEP Control GUI.
+    It handles UI setup, signal/slot connections, and backend thread management.
+    """
+    mcu_connect_signal = pyqtSignal()
+    mcu_disconnect_signal = pyqtSignal()
+
+    logging_signal = pyqtSignal()
     data_saver_stop_signal = pyqtSignal()
-    ZO_start_signal = pyqtSignal()
-    ZO_stop_signal = pyqtSignal()
+
+    # Flow controller signals
+    fc_pump_type_change_signal = pyqtSignal(int, str)
+    fc_flowrate_change_signal = pyqtSignal(int, float)
+    fc_PID_change_signal = pyqtSignal(int, float, float, float)
+    fc_pump_settings_peristaltic_signal = pyqtSignal(int, float, float)
+    fc_pump_settings_syringe_signal = pyqtSignal(int, float, float)
+    fc_mode_change_signal = pyqtSignal(int, str)
+    fc_sensor_change_signal = pyqtSignal(int, bool)
+    fc_enable_change_signal = pyqtSignal(int, bool)
+    fc_dispense_signal = pyqtSignal(int, float, float)
+    fc_dispense_settings_signal = pyqtSignal(int, float, float)
+    fc_continuous_reading_signal = pyqtSignal(bool)
+
+    # Temperature controller signals
+    tc_enable_change_signal = pyqtSignal(int, bool)
+    tc_target_temp_change_signal = pyqtSignal(int, float)
+    tc_PID_change_signal = pyqtSignal(int, float, float, float)
+    tc_sensor_change_signal = pyqtSignal(int, bool)
+    tc_continuous_reading_signal = pyqtSignal(bool)
+
+    # DO sensor signals
+    do_enable_change_signal = pyqtSignal(int, bool)
+    do_start_stop_signal = pyqtSignal(bool)
+
+    clear_plots_signal = pyqtSignal()
+
+    # Sequence runner signal
+    load_and_start_sequence_signal = pyqtSignal(str)
+
+    # Data saver signals
+    start_logging_signal = pyqtSignal(str)
+    stop_logging_signal = pyqtSignal()
 
     def __init__(self):
+        """
+        Initializes the application by orchestrating the setup process.
+        """
         super().__init__()
 
-        # status bools for GUI
+        self._init_state()
+        self._setup_window()
+        self._init_ui()
+        self._create_layouts()
+        self._setup_plots()
+        self._init_backend()
+        self._connect_signals()
+        self._start_services()
+
+    def _init_state(self):
+        """Initializes all the state flags and parameters for the application."""
         self.running = False
         self.connected = False
         self.recording = False
+        self.num_flow_controllers = 4
+        self.num_temp_controllers = 2
+        self.num_do_sensors = 2
 
-        # Initialize UI elements
-        self.setWindowTitle("Syringe Pump Control App")
-        self.setGeometry(100, 100, 1000, 800)  # Adjust the initial window size as needed
+    def _setup_window(self):
+        """Sets the main window's title, size, and stylesheet."""
+        self.setWindowTitle("Zilia MMEP Control GUI")
+        self.setGeometry(100, 100, 1900, 1400)
         self.setStyleSheet("background-color: black; color: rgb(139,203,149)")
 
-        # Create widgets
-        self.flow_rate_label = QLabel("Desired Flow Rate (0-1000 µL/min):")
-        self.flow_rate_input1 = QLineEdit()
-        self.flow_rate_input1.setStyleSheet("color: rgb(139,203,149);")
-        self.flow_rate_input2 = QLineEdit()
-        self.flow_rate_input2.setStyleSheet("color: rgb(139,203,149);")
-        self.flow_rate_input3 = QLineEdit()
-        self.flow_rate_input3.setStyleSheet("color: rgb(139,203,149);")
-        self.flow_rate_input4 = QLineEdit()
-        self.flow_rate_input4.setStyleSheet("color: rgb(139,203,149);")
+    def _init_ui(self):
+        """Creates and initializes all UI widgets."""
+        # --- Flow Controller Widgets ---
+        self.flow_controller_labels = [QLabel(f'Flow Controller {i + 1}') for i in range(self.num_flow_controllers)]
+        self.pump_type_dropdowns = [QComboBox() for _ in range(self.num_flow_controllers)]
+        self.flow_rate_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.proportional_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.integral_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.derivative_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.diameter_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.pitch_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.flow_controller_dropdowns = [QComboBox() for _ in range(self.num_flow_controllers)]
+        self.sensor_dropdowns = [QComboBox() for _ in range(self.num_flow_controllers)]
 
-        self.proportional_input1 = QLineEdit()
-        self.proportional_input2 = QLineEdit()
-        self.proportional_input3 = QLineEdit()
-        self.proportional_input4 = QLineEdit()
+        self.diameter_label = QLabel("Syringe diameter [mm]:")
+        self.pitch_label = QLabel("Thread Pitch [mm/rev]:")
 
-        self.derivative_input1 = QLineEdit()
-        self.derivative_input2 = QLineEdit()
-        self.derivative_input3 = QLineEdit()
-        self.derivative_input4 = QLineEdit()
+        for i in range(self.num_flow_controllers):
+            self.pump_type_dropdowns[i].addItems(['Syringe', 'Peristaltic', 'None'])
+            self.flow_controller_dropdowns[i].addItems(['PID', 'Constant'])
+            self.sensor_dropdowns[i].addItems(['Off', 'On'])
 
-        self.integral_input1 = QLineEdit()
-        self.integral_input2 = QLineEdit()
-        self.integral_input3 = QLineEdit()
-        self.integral_input4 = QLineEdit()
+        # --- Flow Controller Controls Widgets ---
+        self.fc_control_enable = [QCheckBox(f"Enable Controller {i + 1}") for i in range(self.num_flow_controllers)]
+        self.fc_control_volume_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.fc_control_rate_inputs = [QLineEdit() for _ in range(self.num_flow_controllers)]
+        self.fc_control_dispense_buttons = [QPushButton("Dispense Volume") for _ in range(self.num_flow_controllers)]
+        for btn in self.fc_control_dispense_buttons:
+            btn.setStyleSheet("border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
 
-        self.diameter_dropdown1 = QComboBox()
-        self.diameter_dropdown2 = QComboBox()
-        self.diameter_dropdown3 = QComboBox()
-        self.diameter_dropdown4 = QComboBox()
-        self.diameter_dropdown1.addItems(['16 mm (12 mL)','14 mm (10 mL)', '8 mm (3 mL)', '4.7 mm (1 mL)'])
-        self.diameter_dropdown2.addItems(['16 mm (12 mL)','14 mm (10 mL)', '8 mm (3 mL)', '4.7 mm (1 mL)'])
-        self.diameter_dropdown3.addItems(['16 mm (12 mL)', '14 mm (10 mL)','8 mm (3 mL)', '4.7 mm (1 mL)'])
-        self.diameter_dropdown4.addItems(['16 mm (12 mL)','14 mm (10 mL)', '8 mm (3 mL)', '4.7 mm (1 mL)'])
+        # --- Temperature Controller Widgets ---
+        self.temp_controller_labels = [QLabel(f'Temp. Controller {i + 1}') for i in range(self.num_temp_controllers)]
+        self.temp_enable_checkboxes = [QCheckBox() for i in range(self.num_temp_controllers)]
+        self.target_temp_inputs = [QLineEdit() for _ in range(self.num_temp_controllers)]
+        self.temp_proportional_inputs = [QLineEdit() for _ in range(self.num_temp_controllers)]
+        self.temp_integral_inputs = [QLineEdit() for _ in range(self.num_temp_controllers)]
+        self.temp_derivative_inputs = [QLineEdit() for _ in range(self.num_temp_controllers)]
+        self.temp_sensor_dropdowns = [QComboBox() for _ in range(self.num_temp_controllers)]
+        for i in range(self.num_temp_controllers):
+            self.temp_sensor_dropdowns[i].addItems(['Off', 'On'])
 
-        self.pid_params_label = QLabel("PID Parameters:")
-        self.pump1_label = QLabel('Pump 1')
-        self.pump2_label = QLabel('Pump 2')
-        self.pump3_label = QLabel('Pump 3')
-        self.pump4_label = QLabel('Pump 4')
+        # --- DO Sensor Widgets ---
+        self.do_sensor_start_button = QPushButton("Start DO Reading")
+        self.do_sensor_calibrate_button = QPushButton("Calibrate")
+        self.do_sensor_units_dropdown = QComboBox()
+        self.do_sensor_fluid_dropdown = QComboBox()
+        self.do_sensor_enables_checkboxes = []
+        for i in range(self.num_do_sensors):
+            self.do_sensor_enables_checkboxes.append(QCheckBox(f"Enable DO Sensor {i + 1}"))
+        self.do_sensor_start_button.setStyleSheet(
+            "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
+        self.do_sensor_calibrate_button.setStyleSheet(
+            "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
+        self.do_sensor_units_dropdown.addItems(['Raw [V]', 'pO2 [mmhg]', 'SO2 [%]'])
+        self.do_sensor_fluid_dropdown.addItems(['Water', 'Blood'])
 
-        # pump drop down list with options off, pid, and constant
-        self.pump1_dropdown = QComboBox()
-        self.pump2_dropdown = QComboBox()
-        self.pump3_dropdown = QComboBox()
-        self.pump4_dropdown = QComboBox()
-        self.pump1_dropdown.addItems(['Off', 'PID', 'Constant', 'Fill', 'Empty'])
-        self.pump2_dropdown.addItems(['Off', 'PID', 'Constant', 'Fill', 'Empty'])
-        self.pump3_dropdown.addItems(['Off', 'PID', 'Constant', 'Fill', 'Empty'])
-        self.pump4_dropdown.addItems(['Off', 'PID', 'Constant', 'Fill', 'Empty'])
-
-        self.sensor1_dropdown = QComboBox()
-        self.sensor2_dropdown = QComboBox()
-        self.sensor3_dropdown = QComboBox()
-        self.sensor4_dropdown = QComboBox()
-        self.sensor1_dropdown.addItems(['Off', 'On'])
-        self.sensor2_dropdown.addItems(['Off', 'On'])
-        self.sensor3_dropdown.addItems(['Off', 'On'])
-        self.sensor4_dropdown.addItems(['Off', 'On'])
-
-        self.start_button = QPushButton("Start Pump")
-        self.stop_button = QPushButton("Stop Pump")
-        self.connect_button = QPushButton("Connect to Arduino")
-        self.disconnect_button = QPushButton("Disconnect from Arduino")
+        # --- Common Widgets ---
+        self.connect_button = QPushButton("Connect MCU")
         self.load_config_button = QPushButton('Load configuration')
         self.save_config_button = QPushButton('Save configuration')
         self.save_data_button = QPushButton('Log data')
+        self.load_data_button = QPushButton('Load data')
         self.load_sequence_button = QPushButton("Load Sequence")
-
+        self.reset_plot_button = QPushButton("Reset Plots")
 
         self.flowrate_plot_widget = PlotWidget()
-        self.oxygen_plot_widget = PlotWidget()
-        self.zo_plot_widget = PlotWidget()
-        self.log_label = QLabel("Log:")
+        self.do_plot_widget = PlotWidget()
+        self.temp_plot_widget = PlotWidget()
         self.log_widget = QTextEdit()
         self.log_widget.setReadOnly(True)
-        self.logo = QPixmap('logo.png')
-        self.logo.setDevicePixelRatio(1)
-        self.logo_label = QLabel()
-        self.logo_label.setPixmap(self.logo)
 
-        # Create QLineEdit widgets for PID parameters
-        self.proportional_input = QLineEdit()
-        self.derivative_input = QLineEdit()
-        self.integral_input = QLineEdit()
+    def _create_layouts(self):
+        """Arranges all widgets into their respective layouts and sets the central widget."""
+        flow_controller_group_box = self._create_flow_controller_groupbox()
+        fc_controls_group_box = self._create_fc_controls_groupbox()
+        temp_controller_group_box = self._create_temp_controller_groupbox()
+        do_sensor_group_box = self._create_do_sensor_groupbox()
+        config_btn_layout = self._create_config_buttons_layout()
 
-        # generate layouts
-        layout = QGridLayout()
-        config_btn_layout = QVBoxLayout()
         plot_layout = QHBoxLayout()
-
-        # Add flow rate input box to the layout
-        layout.addWidget(QLabel("Desired Flow Rate (0-1000 µL/min):"), 1, 0)
-        layout.addWidget(self.flow_rate_input1, 1, 1)
-        layout.addWidget(self.flow_rate_input2, 1, 2)
-        layout.addWidget(self.flow_rate_input3, 1, 3)
-        layout.addWidget(self.flow_rate_input4, 1, 4)
-
-        # Add PID parameter input boxes to the layout
-        layout.addWidget(QLabel("Proportional (KP)"), 2, 0)
-        layout.addWidget(self.proportional_input1, 2, 1)
-        layout.addWidget(self.proportional_input2, 2, 2)
-        layout.addWidget(self.proportional_input3, 2, 3)
-        layout.addWidget(self.proportional_input4, 2, 4)
-        layout.addWidget(QLabel("Integral (KI):"), 3, 0)
-        layout.addWidget(self.integral_input1, 3, 1)
-        layout.addWidget(self.integral_input2, 3, 2)
-        layout.addWidget(self.integral_input3, 3, 3)
-        layout.addWidget(self.integral_input4, 3, 4)
-        layout.addWidget(QLabel("Derivative (KD):"), 4, 0)
-
-        layout.addWidget(self.derivative_input1, 4, 1)
-        layout.addWidget(self.derivative_input2, 4, 2)
-        layout.addWidget(self.derivative_input3, 4, 3)
-        layout.addWidget(self.derivative_input4, 4, 4)
-
-        # add pump diameter dropdown
-        layout.addWidget(QLabel("Syringe diameter:"), 5, 0)
-        layout.addWidget(self.diameter_dropdown1, 5, 1)
-        layout.addWidget(self.diameter_dropdown2, 5, 2)
-        layout.addWidget(self.diameter_dropdown3, 5, 3)
-        layout.addWidget(self.diameter_dropdown4, 5, 4)
-
-        layout.addWidget(QLabel("Pump mode:"), 6, 0)
-        layout.addWidget(self.pump1_dropdown, 6, 1)
-        layout.addWidget(self.pump2_dropdown, 6, 2)
-        layout.addWidget(self.pump3_dropdown, 6, 3)
-        layout.addWidget(self.pump4_dropdown, 6, 4)
-
-        layout.addWidget(QLabel("Sensor:"), 7, 0)
-        layout.addWidget(self.sensor1_dropdown, 7, 1)
-        layout.addWidget(self.sensor2_dropdown, 7, 2)
-        layout.addWidget(self.sensor3_dropdown, 7, 3)
-        layout.addWidget(self.sensor4_dropdown, 7, 4)
-
-        # add Pump checkboxes
-        layout.addWidget(self.pump1_label, 0, 1)
-        layout.addWidget(self.pump2_label, 0, 2)
-        layout.addWidget(self.pump3_label, 0, 3)
-        layout.addWidget(self.pump4_label, 0, 4)
-        # Add buttons to the layout
-
-        # Add buttons to the layout
-        self.start_button.setStyleSheet(
-            "border: 2px solid black ; background: black; border-radius: 10px; color: black")
-        self.start_button.setEnabled(False)
-        layout.addWidget(self.start_button, 1, 7, 2, 3)
-        self.stop_button.setStyleSheet("border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-        # layout.addWidget(self.stop_button, 2, 7)
-        self.connect_button.setStyleSheet("border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-        layout.addWidget(self.connect_button, 3, 7, 2, 3)
-        self.disconnect_button.setStyleSheet(
-            "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-        # layout.addWidget(self.disconnect_button, 4, 7)
-        config_btn_layout.addWidget(self.load_config_button)
-        self.load_config_button.setStyleSheet(
-            "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-        config_btn_layout.addWidget(self.save_config_button)
-        self.save_config_button.setStyleSheet(
-            "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-        config_btn_layout.addWidget(self.save_data_button)
-        config_btn_layout.addWidget(self.logo_label)
-        self.save_data_button.setStyleSheet(
-            "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-        layout.addLayout(config_btn_layout, 9, 7)
-        self.load_sequence_button.setStyleSheet(
-            "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px")
-        layout.addWidget(self.load_sequence_button, 5, 7, 2, 3)
-
-        # Add the plot to the layout
-        # layout.addWidget(self.flowrate_plot_widget, 6, 0, 1, 3)
-        # layout.addWidget(self.oxygen_plot_widget, 6, 3, 1, 6)
         plot_layout.addWidget(self.flowrate_plot_widget)
-        plot_layout.addWidget(self.oxygen_plot_widget)
-        plot_layout.addWidget(self.zo_plot_widget)
-        layout.addLayout(plot_layout, 8, 0, 1, 8)
+        plot_layout.addWidget(self.temp_plot_widget)
+        plot_layout.addWidget(self.do_plot_widget)
 
-        self.flowrate_plot_widget.setLabel('bottom', 'Time', units='s')
-        self.flowrate_plot_widget.setLabel('left', 'Flow Rate (µL/min)')
-        self.flowrate_plot_widget.setTitle('Flow Rate')
-
-        self.oxygen_plot_widget.addLegend()
-        self.oxygen_plot_widget.setLabel('bottom', 'Time', units='s')
-        self.oxygen_plot_widget.setLabel('left', ' O2 partial pressure', units='mmHg')
-        self.oxygen_plot_widget.setTitle('Oxygen Saturation')
-
-        self.zo_plot_widget.setLabel('bottom', 'Wavelength', units='nm')
-        self.zo_plot_widget.setLabel('left', 'Intensity', units='A.U.')
-        self.zo_plot_widget.setTitle('Raw spectrum')
-        self.zo_plot_widget.setXRange(450, 800)
-        self.zo_plot_widget.setYRange(0, 65000)
-        # Add the log label and widget
-        layout.addWidget(self.log_widget, 9, 0, 1, 6)
+        main_layout = QGridLayout()
+        main_layout.addWidget(flow_controller_group_box, 0, 0, 9, 4)
+        main_layout.addWidget(fc_controls_group_box, 0, 4, 9, 4)
+        main_layout.addWidget(temp_controller_group_box, 0, 8, 9, 3)
+        main_layout.addWidget(do_sensor_group_box, 0, 11, 9, 2)
+        main_layout.addLayout(plot_layout, 9, 0, 1, 15)
+        main_layout.addWidget(self.log_widget, 10, 0, 1, 13)
+        main_layout.addLayout(config_btn_layout, 10, 13, 1, 2)
 
         central_widget = QWidget()
-        central_widget.setLayout(layout)
+        central_widget.setLayout(main_layout)
         self.setCentralWidget(central_widget)
 
-        # Initialize Arduino communication thread
-        self.arduino_thread = ArduinoThread()
-        self.zo_thread = ZOThread()
-        self.sequence_runner = SequenceRunner()
+    def _create_groupbox_stylesheet(self):
+        """Returns a standard stylesheet for QGroupBox elements."""
+        return """
+            QGroupBox {
+                border: 1px solid green;
+                border-radius: 5px;
+                margin-top: 10px;
+                color: rgb(139,203,149);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top center;
+                padding: 0 5px;
+            }
+        """
 
-        # Connect signals to slots
-        self.start_button.clicked.connect(self.startstop_button_onclick)
+    def _create_flow_controller_groupbox(self):
+        """Creates and returns the Flow Controllers QGroupBox."""
+        group_box = QGroupBox("Flow Controllers")
+        group_box.setStyleSheet(self._create_groupbox_stylesheet())
+        layout = QGridLayout()
+        layout.addWidget(QLabel("Pump Type:"), 1, 0)
+        layout.addWidget(QLabel("Desired Flow Rate (µL/min):"), 2, 0)
+        layout.addWidget(QLabel("Proportional (KP)"), 3, 0)
+        layout.addWidget(QLabel("Integral (KI):"), 4, 0)
+        layout.addWidget(QLabel("Derivative (KD):"), 5, 0)
+        layout.addWidget(self.diameter_label, 6, 0)
+        layout.addWidget(self.pitch_label, 7, 0)
+        layout.addWidget(QLabel("Mode:"), 8, 0)
+        layout.addWidget(QLabel("Sensor:"), 9, 0)
+
+        for i in range(self.num_flow_controllers):
+            col = i + 1
+            layout.addWidget(self.flow_controller_labels[i], 0, col)
+            layout.addWidget(self.pump_type_dropdowns[i], 1, col)
+            layout.addWidget(self.flow_rate_inputs[i], 2, col)
+            layout.addWidget(self.proportional_inputs[i], 3, col)
+            layout.addWidget(self.integral_inputs[i], 4, col)
+            layout.addWidget(self.derivative_inputs[i], 5, col)
+            layout.addWidget(self.diameter_inputs[i], 6, col)
+            layout.addWidget(self.pitch_inputs[i], 7, col)
+            layout.addWidget(self.flow_controller_dropdowns[i], 8, col)
+            layout.addWidget(self.sensor_dropdowns[i], 9, col)
+
+        group_box.setLayout(layout)
+        return group_box
+
+    def _create_fc_controls_groupbox(self):
+        """Creates and returns the Flow Controller Controls QGroupBox."""
+        group_box = QGroupBox("Flow Controller Controls")
+        group_box.setStyleSheet(self._create_groupbox_stylesheet())
+        layout = QGridLayout()
+        layout.addWidget(QLabel("Volume [µL]"), 0, 1)
+        layout.addWidget(QLabel("Dispense Rate [µL/min]"), 0, 2)
+        for i in range(self.num_flow_controllers):
+            layout.addWidget(self.fc_control_enable[i], i + 1, 0)
+            layout.addWidget(self.fc_control_volume_inputs[i], i + 1, 1)
+            layout.addWidget(self.fc_control_rate_inputs[i], i + 1, 2)
+            layout.addWidget(self.fc_control_dispense_buttons[i], i + 1, 3)
+        layout.setRowStretch(self.num_flow_controllers + 1, 1)
+        group_box.setLayout(layout)
+        return group_box
+
+    def _create_temp_controller_groupbox(self):
+        """Creates and returns the Temperature Controllers QGroupBox."""
+        group_box = QGroupBox("Temperature Controllers")
+        group_box.setStyleSheet(self._create_groupbox_stylesheet())
+        layout = QGridLayout()
+        layout.addWidget(QLabel("Enable:"), 1, 0)
+        layout.addWidget(QLabel("Target Temp (°C):"), 2, 0)
+        layout.addWidget(QLabel("Proportional (KP)"), 3, 0)
+        layout.addWidget(QLabel("Integral (KI):"), 4, 0)
+        layout.addWidget(QLabel("Derivative (KD):"), 5, 0)
+        layout.addWidget(QLabel("Sensor:"), 6, 0)
+        for i in range(self.num_temp_controllers):
+            col = i + 1
+            layout.addWidget(self.temp_controller_labels[i], 0, col)
+            layout.addWidget(self.temp_enable_checkboxes[i], 1, col)
+            layout.addWidget(self.target_temp_inputs[i], 2, col)
+            layout.addWidget(self.temp_proportional_inputs[i], 3, col)
+            layout.addWidget(self.temp_integral_inputs[i], 4, col)
+            layout.addWidget(self.temp_derivative_inputs[i], 5, col)
+            layout.addWidget(self.temp_sensor_dropdowns[i], 6, col)
+        layout.setRowStretch(7, 1)
+        group_box.setLayout(layout)
+        return group_box
+
+    def _create_do_sensor_groupbox(self):
+        """Creates and returns the DO Sensors QGroupBox."""
+        group_box = QGroupBox("DO Sensors")
+        group_box.setStyleSheet(self._create_groupbox_stylesheet())
+        layout = QGridLayout()
+        layout.addWidget(self.do_sensor_start_button, 0, 0, 1, 2)
+        layout.addWidget(self.do_sensor_calibrate_button, 1, 0, 1, 2)
+        layout.addWidget(QLabel("Units:"), 2, 0)
+        layout.addWidget(self.do_sensor_units_dropdown, 2, 1)
+        layout.addWidget(QLabel("Fluid Type:"), 3, 0)
+        layout.addWidget(self.do_sensor_fluid_dropdown, 3, 1)
+        for i in range(self.num_do_sensors):
+            layout.addWidget(self.do_sensor_enables_checkboxes[i], i + 4, 0, 1, 2)
+        layout.setRowStretch(6, 1)
+        group_box.setLayout(layout)
+        return group_box
+
+    def _create_config_buttons_layout(self):
+        """Creates and returns the layout for configuration buttons and the logo."""
+        layout = QVBoxLayout()
+        button_stylesheet = "border: 2px solid rgb(139,203,149); background: black; border-radius: 10px"
+        self.connect_button.setStyleSheet(button_stylesheet)
+        self.load_sequence_button.setStyleSheet(button_stylesheet)
+        self.load_config_button.setStyleSheet(button_stylesheet)
+        self.save_config_button.setStyleSheet(button_stylesheet)
+        self.save_data_button.setStyleSheet(button_stylesheet)
+        self.load_data_button.setStyleSheet(button_stylesheet)
+        self.reset_plot_button.setStyleSheet(button_stylesheet)
+
+        layout.addWidget(self.connect_button)
+        layout.addWidget(self.load_sequence_button)
+        layout.addWidget(self.load_config_button)
+        layout.addWidget(self.save_config_button)
+        layout.addWidget(self.save_data_button)
+        layout.addWidget(self.load_data_button)
+        layout.addWidget(self.reset_plot_button)
+
+        logo_label = QLabel()
+        if os.path.exists('logo.png'):
+            pixmap = QPixmap('logo.png')
+            logo_label.setPixmap(pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            logo_label.setText("logo.png not found")
+        logo_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(logo_label)
+
+        layout.addStretch()
+        return layout
+
+    def _set_controls_enabled(self, enabled):
+        """Enable or disable all flow and temperature controller UI elements."""
+        # Flow controller widgets
+        for i in range(self.num_flow_controllers):
+            self.pump_type_dropdowns[i].setEnabled(enabled)
+            self.flow_rate_inputs[i].setEnabled(enabled)
+            self.proportional_inputs[i].setEnabled(enabled)
+            self.integral_inputs[i].setEnabled(enabled)
+            self.derivative_inputs[i].setEnabled(enabled)
+            self.diameter_inputs[i].setEnabled(enabled)
+            self.pitch_inputs[i].setEnabled(enabled)
+            self.flow_controller_dropdowns[i].setEnabled(enabled)
+            self.sensor_dropdowns[i].setEnabled(enabled)
+            self.fc_control_enable[i].setEnabled(enabled)
+            self.fc_control_volume_inputs[i].setEnabled(enabled)
+            self.fc_control_rate_inputs[i].setEnabled(enabled)
+            self.fc_control_dispense_buttons[i].setEnabled(enabled)
+
+        # Temperature controller widgets
+        for i in range(self.num_temp_controllers):
+            self.temp_enable_checkboxes[i].setEnabled(enabled)
+            self.target_temp_inputs[i].setEnabled(enabled)
+            self.temp_proportional_inputs[i].setEnabled(enabled)
+            self.temp_integral_inputs[i].setEnabled(enabled)
+            self.temp_derivative_inputs[i].setEnabled(enabled)
+            self.temp_sensor_dropdowns[i].setEnabled(enabled)
+
+    def _setup_plots(self):
+        """Configures the aesthetics and data structures for the plots."""
+        self.flowrate_plot_widget.setLabel('bottom', 'Time', units='s')
+        self.flowrate_plot_widget.setLabel('left', 'Flow Rate (µL/min)')
+        self.flowrate_plot_widget.setTitle('Flow Sensors')
+        self.flowrate_plot_widget.addLegend()
+        self.do_plot_widget.addLegend()
+        self.do_plot_widget.setLabel('bottom', 'Time', units='s')
+        self.do_plot_widget.setLabel('left', ' Raw voltage', units='V')
+        self.do_plot_widget.setTitle('Oxygen Sensors')
+        self.temp_plot_widget.setLabel('bottom', 'Wavelength', units='nm')
+        self.temp_plot_widget.setLabel('left', 'Intensity', units='°C')
+        self.temp_plot_widget.setTitle('Temperature Sensors')
+
+    def _init_backend(self):
+        """Initializes all backend threads and worker objects."""
+        # --- Worker-Object Threading Pattern ---
+        self.mcu_thread = QThread()
+        self.mcu_thread.setObjectName("MCU_Thread")
+        self.mcu_worker = MCUWorker()
+        self.mcu_worker.moveToThread(self.mcu_thread)
+        # ---
+
+        # --- Sequence Runner Setup ---
+        self.sequence_thread = QThread()
+        self.sequence_thread.setObjectName("Sequence_Thread")
+        self.sequence_runner = SequenceRunner()
+        self.sequence_runner.moveToThread(self.sequence_thread)
+
+        # --- Data Saver Setup ---
+        self.data_saver_thread = QThread()
+        self.data_saver_thread.setObjectName("DataSaver_Thread")
+        self.data_saver = DataSaver()
+        self.data_saver.moveToThread(self.data_saver_thread)
+
+        self.flow_controllers = FlowControllerThread()
+        self.temp_controllers = TemperatureControllerThread()
+        self.do_sensors = DOSensorThread()
+        self.gui_updater = GUIUpdater(self.log_widget,
+                                      self.do_plot_widget,
+                                      self.temp_plot_widget,
+                                      self.flowrate_plot_widget,
+                                      self.connect_button,
+                                      self.flow_controllers.flow_controllers,
+                                      self.temp_controllers.temperature_controllers,
+                                      self.do_sensors.do_sensors)
+
+    def _connect_signals(self):
+        """Connects all signals to their corresponding slots."""
+        # Button Clicks
         self.connect_button.clicked.connect(self.connectdisconnect_button_onclick)
         self.load_config_button.clicked.connect(self.load_config_button_onclick)
         self.save_config_button.clicked.connect(self.save_config_button_onclick)
         self.save_data_button.clicked.connect(self.save_data_button_onclick)
+        self.load_data_button.clicked.connect(self.load_data_button_onclick)
         self.load_sequence_button.clicked.connect(self.sequence_onclick)
-        self.flow_rate_input1.textChanged.connect(lambda: self.flowrate_input_onchange('pump1'))
-        self.proportional_input1.textChanged.connect(lambda: self.PID_input_onchange('pump1', 'proportional'))
-        self.derivative_input1.textChanged.connect(lambda: self.PID_input_onchange('pump1', 'derivative'))
-        self.integral_input1.textChanged.connect(lambda: self.PID_input_onchange('pump1', 'integral'))
-        self.flow_rate_input2.textChanged.connect(lambda: self.flowrate_input_onchange('pump2'))
-        self.proportional_input2.textChanged.connect(lambda: self.PID_input_onchange('pump2', 'proportional'))
-        self.derivative_input2.textChanged.connect(lambda: self.PID_input_onchange('pump2', 'derivative'))
-        self.integral_input2.textChanged.connect(lambda: self.PID_input_onchange('pump2', 'integral'))
-        self.flow_rate_input3.textChanged.connect(lambda: self.flowrate_input_onchange('pump3'))
-        self.proportional_input3.textChanged.connect(lambda: self.PID_input_onchange('pump3', 'proportional'))
-        self.derivative_input3.textChanged.connect(lambda: self.PID_input_onchange('pump3', 'derivative'))
-        self.integral_input3.textChanged.connect(lambda: self.PID_input_onchange('pump3', 'integral'))
-        self.flow_rate_input4.textChanged.connect(lambda: self.flowrate_input_onchange('pump4'))
-        self.proportional_input4.textChanged.connect(lambda: self.PID_input_onchange('pump4', 'proportional'))
-        self.derivative_input4.textChanged.connect(lambda: self.PID_input_onchange('pump4', 'derivative'))
+        self.do_sensor_calibrate_button.clicked.connect(self.open_calibration_window)
+        self.reset_plot_button.clicked.connect(self.reset_plot_button_onclick)
 
-        self.arduino_start_signal.connect(self.arduino_thread.start)
-        self.arduino_stop_signal.connect(self.arduino_thread.stop)
-        self.arduino_connect_signal.connect(self.arduino_thread.connect)
-        self.arduino_disconnect_signal.connect(self.arduino_thread.close, Qt.DirectConnection)
-        self.pump1_dropdown.currentTextChanged.connect(lambda: self.mode_on_change('pump1'))
-        self.pump2_dropdown.currentTextChanged.connect(lambda: self.mode_on_change('pump2'))
-        self.pump3_dropdown.currentTextChanged.connect(lambda: self.mode_on_change('pump3'))
-        self.pump4_dropdown.currentTextChanged.connect(lambda: self.mode_on_change('pump4'))
-        self.sensor1_dropdown.currentTextChanged.connect(lambda: self.sensor_on_change('pump1'))
-        self.sensor2_dropdown.currentTextChanged.connect(lambda: self.sensor_on_change('pump2'))
-        self.sensor3_dropdown.currentTextChanged.connect(lambda: self.sensor_on_change('pump3'))
-        self.sensor4_dropdown.currentTextChanged.connect(lambda: self.sensor_on_change('pump4'))
-        self.diameter_dropdown1.currentTextChanged.connect(lambda: self.diameter_onchange('pump1'))
-        self.diameter_dropdown2.currentTextChanged.connect(lambda: self.diameter_onchange('pump2'))
-        self.diameter_dropdown3.currentTextChanged.connect(lambda: self.diameter_onchange('pump3'))
-        self.diameter_dropdown4.currentTextChanged.connect(lambda: self.diameter_onchange('pump4'))
+        # Flow Controller Inputs
+        for i in range(self.num_flow_controllers):
+            self.flow_rate_inputs[i].textChanged.connect(functools.partial(self.fc_flowrate_onchange, i))
+            self.proportional_inputs[i].textChanged.connect(
+                functools.partial(self.fc_PID_input_onchange, i, 'proportional'))
+            self.integral_inputs[i].textChanged.connect(functools.partial(self.fc_PID_input_onchange, i, 'integral'))
+            self.derivative_inputs[i].textChanged.connect(
+                functools.partial(self.fc_PID_input_onchange, i, 'derivative'))
+            self.flow_controller_dropdowns[i].currentTextChanged.connect(functools.partial(self.fc_mode_on_change, i))
+            self.sensor_dropdowns[i].currentTextChanged.connect(functools.partial(self.fc_sensor_on_change, i))
+            self.pump_type_dropdowns[i].currentTextChanged.connect(functools.partial(self.fc_pump_type_onchange, i))
+            self.diameter_inputs[i].textChanged.connect(functools.partial(self.fc_pump_parameter_input_onchange, i))
+            self.pitch_inputs[i].textChanged.connect(functools.partial(self.fc_pump_parameter_input_onchange, i))
+            self.fc_control_enable[i].stateChanged.connect(functools.partial(self.fc_enable_onchange, i))
+            self.fc_control_dispense_buttons[i].clicked.connect(functools.partial(self.fc_dispense_onclick, i))
 
-        # Initialize FIFO buffer with a maximum length of 1000 points
-        self.flowrate_buffer_length = 10000
-        self.oxygen_buffer_length = 10000
-        self.flowrate1_buffer = deque(maxlen=self.flowrate_buffer_length)
-        self.flowrate2_buffer = deque(maxlen=self.flowrate_buffer_length)
-        self.flowrate3_buffer = deque(maxlen=self.flowrate_buffer_length)
-        self.flowrate4_buffer = deque(maxlen=self.flowrate_buffer_length)
-        self.oxygen1_buffer = deque(maxlen=self.oxygen_buffer_length)
-        self.oxygen2_buffer = deque(maxlen=self.oxygen_buffer_length)
+        # Temperature Controller Inputs
+        for i in range(self.num_temp_controllers):
+            self.target_temp_inputs[i].textChanged.connect(functools.partial(self.tc_target_temp_onchange, i))
+            self.temp_proportional_inputs[i].textChanged.connect(
+                functools.partial(self.tc_PID_input_onchange, i, 'proportional'))
+            self.temp_integral_inputs[i].textChanged.connect(
+                functools.partial(self.tc_PID_input_onchange, i, 'integral'))
+            self.temp_derivative_inputs[i].textChanged.connect(
+                functools.partial(self.tc_PID_input_onchange, i, 'derivative'))
+            self.temp_sensor_dropdowns[i].currentTextChanged.connect(functools.partial(self.tc_sensor_on_change, i))
+            self.temp_enable_checkboxes[i].stateChanged.connect(functools.partial(self.tc_enable_onchange, i))
 
-        self.flowrate_plot_widget.plot(list(self.flowrate1_buffer), pen=(255, 255, 102), name='pump 1')
-        self.flowrate_plot_widget.plot(list(self.flowrate2_buffer), pen=(139, 203, 149), name='pump 2')
-        self.flowrate_plot_widget.plot(list(self.flowrate3_buffer), pen=(51, 204, 204), name='pump 3')
-        self.flowrate_plot_widget.plot(list(self.flowrate4_buffer), pen=(0, 102, 255), name='pump 4')
-        self.oxygen_plot_widget.plot(list(self.oxygen1_buffer), pen=(255, 255, 102), name='Retina')
-        self.oxygen_plot_widget.plot(list(self.oxygen2_buffer), pen=(139,203,149), name='Choroid')
-        # add legends
-        self.flowrate_plot_widget.addLegend()
-        self.oxygen_plot_widget.addLegend()
+        # DO Sensor Inputs
+        for i in range(self.num_do_sensors):
+            self.do_sensor_enables_checkboxes[i].stateChanged.connect(functools.partial(self.do_enable_onchange, i))
 
-        ##self.oxygen_value_text = TextItem(text="Current Oxygen Value: ")
-        # self.oxygen_value_text.setPos(10, 10)  # Adjust the position as needed
-        # self.oxygen_plot_widget.addItem(self.oxygen_value_text)
+        self.do_sensor_start_button.clicked.connect(self.do_start_stop_onclick)
+        self.do_sensor_fluid_dropdown.currentTextChanged.connect(self.do_fluid_onchange)
+        self.do_sensor_units_dropdown.currentTextChanged.connect(self.do_units_onchange)
 
-        # ZO thread signals
-        self.ZO_start_signal.connect(self.zo_thread.start)
-        self.ZO_stop_signal.connect(self.zo_thread.stop)
+        # --- Corrected MCU Connections ---
+        # Internal Application Signals
+        self.mcu_connect_signal.connect(self.mcu_worker.connect_mcu)
+        self.mcu_disconnect_signal.connect(self.mcu_worker.disconnect_mcu)
 
-        # Initialize GUI updater
-        self.gui_updater = GUIUpdater(self.log_widget, self.zo_plot_widget, self.start_button, self.connect_button)
-        self.gui_updater.update_signal.connect(self.update_plot)
+        # Thread Communication Signals (from worker to GUI)
+        self.mcu_worker.log_signal.connect(self.gui_updater.update_log)
+        self.mcu_worker.connected_signal.connect(self.gui_updater.update_connectdisconnect_button)
+        self.mcu_worker.connected_signal.connect(self.update_connected)
+        self.mcu_worker.parser.do_data_signal.connect(self.do_sensors.process_do_serial_data)
+        self.mcu_worker.parser.temp_data_signal.connect(self.temp_controllers.process_temp_serial_data)
+        self.mcu_worker.parser.flow_data_signal.connect(self.flow_controllers.process_flow_serial_data)
 
-        # Connect Arduino thread signal to GUI updater slot
-        self.arduino_thread.sensor_signal.connect(self.gui_updater.process_sensor_data)
-        self.arduino_thread.log_signal.connect(self.gui_updater.update_log)
-        self.arduino_thread.running_signal.connect(self.gui_updater.update_startstop_button)
-        self.arduino_thread.running_signal.connect(self.update_running)
-        self.arduino_thread.connected_signal.connect(self.gui_updater.update_connectdisconnect_button)
-        self.arduino_thread.connected_signal.connect(self.update_connected)
-        self.zo_thread.data_signal.connect(self.gui_updater.update_ZO_plot)
+        # --- Data Saver Connections ---
+        self.start_logging_signal.connect(self.data_saver.start_saving_to_file)
+        self.stop_logging_signal.connect(self.data_saver.stop_save)
+        # Connect MCU data directly to the saver
+        self.mcu_worker.parser.flow_data_signal.connect(self.data_saver.save_flow_data)
+        self.mcu_worker.parser.temp_data_signal.connect(self.data_saver.save_temp_data)
+        self.mcu_worker.parser.do_data_signal.connect(self.data_saver.save_do_data)
 
-        # initialize syringe pump object
-        self.syringe_pumps = SyringePumps()
-        self.syringe_pumps.arduino_signal.connect(self.arduino_thread.on_syringe_pump_signal)
-        self.arduino_thread.update_all_signal.connect(self.syringe_pumps.set_all)
+        # Flow Controller Signals (from GUI to worker)
+        self.fc_pump_settings_peristaltic_signal.connect(self.flow_controllers.set_parameters_peristaltic)
+        self.fc_pump_settings_syringe_signal.connect(self.flow_controllers.set_parameters_syringe)
+        self.fc_dispense_signal.connect(self.flow_controllers.start_dispense)
+        self.fc_PID_change_signal.connect(self.flow_controllers.set_pid)
+        self.fc_enable_change_signal.connect(self.flow_controllers.start_stop)
+        self.fc_flowrate_change_signal.connect(self.flow_controllers.set_flowrate)
+        self.fc_mode_change_signal.connect(self.flow_controllers.set_mode)
+        self.fc_sensor_change_signal.connect(self.flow_controllers.set_sensor)
+        self.fc_continuous_reading_signal.connect(self.flow_controllers.set_continuous_reading)
+        self.flow_controllers.mcu_signal.connect(self.mcu_worker.submit_command)
+        self.flow_controllers.update_plot_signal.connect(self.gui_updater.update_flow_plot)
 
-        #Initialize data saver object
-        self.data_saver = DataSaver()
-        self.arduino_logging_signal.connect(self.arduino_thread.start_logging, Qt.DirectConnection)
-        self.data_saver_stop_signal.connect(self.data_saver.stop_save)
+        # Temperature Controller Signals (from GUI to worker)
+        self.tc_enable_change_signal.connect(self.temp_controllers.set_enable)
+        self.tc_target_temp_change_signal.connect(self.temp_controllers.set_temperature)
+        self.tc_PID_change_signal.connect(self.temp_controllers.set_pid)
+        self.tc_sensor_change_signal.connect(self.temp_controllers.set_sensor)
+        self.tc_continuous_reading_signal.connect(self.temp_controllers.set_continuous_reading)
+        self.temp_controllers.mcu_signal.connect(self.mcu_worker.submit_command)
+        self.temp_controllers.update_plot_signal.connect(self.gui_updater.update_temp_plot)
+
+        # DO Sensor Signals (from GUI to worker)
+        self.do_enable_change_signal.connect(self.do_sensors.do_enable)
+        self.do_start_stop_signal.connect(self.do_sensors.do_start_stop)
+        self.do_sensors.mcu_signal.connect(self.mcu_worker.submit_command)
+        self.do_sensors.update_plot_signal.connect(self.gui_updater.update_do_plot)
+
+        # Sequence Runner Signals
+        self.load_and_start_sequence_signal.connect(self.sequence_runner.load_and_start_sequence)
+        self.sequence_runner.log_signal.connect(self.gui_updater.update_log)
+        self.sequence_runner.sequence_started_signal.connect(self.on_sequence_started)
+        self.sequence_runner.sequence_finished_signal.connect(self.on_sequence_finished)
+        # Connect sequence signals to controller threads to command hardware
+        self.sequence_runner.set_flow_rate_signal.connect(self.flow_controllers.set_flowrate)
+        self.sequence_runner.enable_pump_signal.connect(self.flow_controllers.start_stop)
+        self.sequence_runner.set_temperature_signal.connect(self.temp_controllers.set_temperature)
+        self.sequence_runner.enable_heater_signal.connect(self.temp_controllers.set_enable)
+        self.sequence_runner.dispense_volume_signal.connect(self.flow_controllers.start_dispense)
+        self.sequence_runner.start_logging_signal.connect(self.on_sequence_start_logging)
+        self.sequence_runner.stop_logging_signal.connect(self.on_sequence_stop_logging)
+        # Connect sequence signals to UI update slots
+        self.sequence_runner.set_flow_rate_signal.connect(self.update_flow_rate_input)
+        self.sequence_runner.enable_pump_signal.connect(self.update_pump_enable_checkbox)
+        self.sequence_runner.set_temperature_signal.connect(self.update_temperature_input)
+        self.sequence_runner.enable_heater_signal.connect(self.update_heater_enable_checkbox)
+
+        # ---
+        self.clear_plots_signal.connect(self.flow_controllers.clear_buffers)
+        self.clear_plots_signal.connect(self.temp_controllers.clear_buffers)
+        self.clear_plots_signal.connect(self.do_sensors.clear_buffers)
+
+    def _start_services(self):
+        """Loads the default configuration and starts all background threads."""
 
 
-
-        # Load default config .ini
-        self.load_config('C:/Users/marca/PycharmProjects/MMEP-Control-GUI/default.ini')
-
-        # Update syringe_pumps object with 'default' config
-        self.syringe_pumps.set_flow(0, float(self.flow_rate_input1.text()))
-        self.syringe_pumps.set_flow(1, float(self.flow_rate_input2.text()))
-        self.syringe_pumps.set_flow(2, float(self.flow_rate_input3.text()))
-        self.syringe_pumps.set_flow(3, float(self.flow_rate_input4.text()))
-        self.syringe_pumps.set_mode(0, self.pump1_dropdown.currentText())
-        self.syringe_pumps.set_mode(1, self.pump2_dropdown.currentText())
-        self.syringe_pumps.set_mode(2, self.pump3_dropdown.currentText())
-        self.syringe_pumps.set_mode(3, self.pump4_dropdown.currentText())
-
-        # get syringe pump info
-        self.syringe_pumps.pumps[0].info()
-        self.syringe_pumps.pumps[1].info()
-        self.syringe_pumps.pumps[2].info()
-        self.syringe_pumps.pumps[3].info()
-
-        # Start threads
-        self.arduino_thread.start()
-        self.zo_thread.start()
+        self.mcu_thread.start()
+        self.sequence_thread.start()
+        self.data_saver_thread.start()
         self.gui_updater.start()
-        self.data_saver.start()
-        self.syringe_pumps.start()
-        self.sequence_runner.start()
+        self.flow_controllers.start()
+        self.temp_controllers.start()
+        self.do_sensors.start()
 
+        #try to connect to mcu on startup
+        self.mcu_connect_signal.emit()
+        self.load_config('default.ini')
+        for i in range(self.num_flow_controllers):
+            self.flow_controllers.set_flowrate(i, float(self.flow_rate_inputs[i].text()))
+            self.flow_controllers.set_mode(i, self.flow_controller_dropdowns[i].currentText())
 
-    def startstop_button_onclick(self):
-
-        if (not (self.running)):
-            self.arduino_start_signal.emit()
-            self.ZO_start_signal.emit()
+    def open_calibration_window(self):
+        """Opens the DO sensor calibration window."""
+        calibration_dialog = CalibrationWindow(self)
+        result = calibration_dialog.exec_()
+        if result == QDialog.Accepted:
+            self.log_widget.append("Calibration Accepted.")
         else:
-            self.arduino_stop_signal.emit()
-            self.ZO_stop_signal.emit()
-        # Implement pump start logic
-        pass
+            self.log_widget.append("Calibration Canceled.")
 
     def connectdisconnect_button_onclick(self):
-        if (not (self.connected)):
-            self.arduino_connect_signal.emit()
+        """Handles the connect/disconnect button click."""
+        if not self.connected:
+            self.mcu_connect_signal.emit()
         else:
-            print('disconnect')
-            self.arduino_disconnect_signal.emit()
+            self.mcu_disconnect_signal.emit()
 
-    def update_plot(self, data):
-        #print(data)
-        data = data.strip().split(',')
-        self.flowrate1_buffer.append(float(data[1]))
-        self.flowrate2_buffer.append(float(data[2]))
-        self.flowrate3_buffer.append(float(data[3]))
-        self.flowrate4_buffer.append(float(data[4]))
-        self.oxygen1_buffer.append(float(data[5]))
-        self.oxygen2_buffer.append(float(data[6]))
-        # self.oxygen_value_text.setText(f"Current Oxygen Value: {data[4]}, {data[5]}")  # Update the text item with the latest oxygen value
+    def fc_enable_onchange(self, fc_index):
+        try:
+            enabled = self.fc_control_enable[fc_index].isChecked()
+            self.fc_enable_change_signal.emit(fc_index, enabled)
+        except IndexError:
+            pass
 
-        # Update the pyqtgraph plot with the latest 1000 points from the buffer
-        self.flowrate_plot_widget.clear()
-        self.oxygen_plot_widget.clear()
-        self.flowrate_plot_widget.plot(list(self.flowrate1_buffer), pen=(255, 255, 102), name='pump 1')
-        self.flowrate_plot_widget.plot(list(self.flowrate2_buffer), pen=(0, 204, 102), name='pump 2')
-        self.flowrate_plot_widget.plot(list(self.flowrate3_buffer), pen=(51, 204, 204), name='pump 3')
-        self.flowrate_plot_widget.plot(list(self.flowrate4_buffer), pen=(0, 102, 255), name='pump 4')
-        self.oxygen_plot_widget.plot(list(self.oxygen1_buffer), pen=(255, 255, 102), name='Retina')
-        self.oxygen_plot_widget.plot(list(self.oxygen2_buffer), pen=(0, 204, 102), name='Choroid')
+    def fc_flowrate_onchange(self, fc_index):
+        try:
+            flowrate = float(self.flow_rate_inputs[fc_index].text())
+            self.fc_flowrate_change_signal.emit(fc_index, flowrate)
+        except (ValueError, IndexError):
+            pass
 
-    def flowrate_input_onchange(self, pump):
-        # Method that updates the flow rate of a pump
-        # If the flow rate is changed, update the syringe_pumps object
-        if pump == 'pump1':
-            self.syringe_pumps.set_flow(0, float(self.flow_rate_input1.text()))
-        elif pump == 'pump2':
-            self.syringe_pumps.set_flow(1, float(self.flow_rate_input2.text()))
-        elif pump == 'pump3':
-            self.syringe_pumps.set_flow(2, float(self.flow_rate_input3.text()))
-        elif pump == 'pump4':
-            self.syringe_pumps.set_flow(3, float(self.flow_rate_input4.text()))
+    def fc_dispense_onclick(self, fc_index):
+        try:
+            volume = float(self.fc_control_volume_inputs[fc_index].text())
+            rate = float(self.fc_control_rate_inputs[fc_index].text())
+            if volume <= 0 or rate <= 0:
+                self.log_widget.append(
+                    f"Error: Volume and rate must be positive numbers for Flow Controller {fc_index + 1}.")
+                return
+            self.fc_dispense_signal.emit(fc_index, volume, rate)
+        except (ValueError, IndexError):
+            pass
 
-    def PID_input_onchange(self, pump, parameter):
-        # Method that updates the PID parameters of a pump
-        # If a PID parameter is changed, update the syringe_pumps object
-        if pump == 'pump1':
-            if parameter == 'proportional':
-                self.syringe_pumps.set_pid(0, Kp=float(self.proportional_input1.text()))
-            elif parameter == 'derivative':
-                self.syringe_pumps.set_pid(0, Kd=float(self.derivative_input1.text()))
-            elif parameter == 'integral':
-                self.syringe_pumps.set_pid(0, Ki=float(self.integral_input1.text()))
-        elif pump == 'pump2':
-            if parameter == 'proportional':
-                self.syringe_pumps.set_pid(1, Kp=float(self.proportional_input2.text()))
-            elif parameter == 'derivative':
-                self.syringe_pumps.set_pid(1, Kd=float(self.derivative_input2.text()))
-            elif parameter == 'integral':
-                self.syringe_pumps.set_pid(1, Ki=float(self.integral_input2.text()))
-        elif pump == 'pump3':
-            if parameter == 'proportional':
-                self.syringe_pumps.set_pid(2, Kp=float(self.proportional_input3.text()))
-            elif parameter == 'derivative':
-                self.syringe_pumps.set_pid(2, Kd=float(self.derivative_input3.text()))
-            elif parameter == 'integral':
-                self.syringe_pumps.set_pid(2, Ki=float(self.integral_input3.text()))
-        elif pump == 'pump4':
-            if parameter == 'proportional':
-                self.syringe_pumps.set_pid(3, Kp=float(self.proportional_input4.text()))
-            elif parameter == 'derivative':
-                self.syringe_pumps.set_pid(3, Kd=float(self.derivative_input4.text()))
-            elif parameter == 'integral':
-                self.syringe_pumps.set_pid(3, Ki=float(self.integral_input4.text()))
+    def fc_pump_type_onchange(self, fc_index):
+        try:
+            pump_type = self.pump_type_dropdowns[fc_index].currentText()
+            self.flow_controllers.set_pump_type(fc_index, pump_type)
+            fc = self.flow_controllers.flow_controllers[fc_index]
+            self.diameter_inputs[fc_index].blockSignals(True)
+            self.pitch_inputs[fc_index].blockSignals(True)
+            if pump_type == 'Syringe':
+                self.diameter_label.setText("Syringe diameter [mm]:")
+                self.pitch_label.setText("Thread Pitch [mm/rev]:")
+                self.diameter_inputs[fc_index].setText(str(fc.diameter))
+                self.pitch_inputs[fc_index].setText(str(fc.thread_pitch))
+                self.diameter_inputs[fc_index].setEnabled(True)
+                self.pitch_inputs[fc_index].setEnabled(True)
+                self.fc_pump_settings_syringe_signal.emit(fc_index, fc.diameter, fc.thread_pitch)
+            elif pump_type == 'Peristaltic':
+                self.diameter_label.setText("Tube diameter [mm]:")
+                self.pitch_label.setText("Calibration factor:")
+                self.diameter_inputs[fc_index].setText(str(fc.tube_diameter))
+                self.pitch_inputs[fc_index].setText(str(fc.peristaltic_calibration))
+                self.diameter_inputs[fc_index].setEnabled(True)
+                self.pitch_inputs[fc_index].setEnabled(True)
+                self.fc_pump_settings_peristaltic_signal.emit(fc_index, fc.tube_diameter, fc.peristaltic_calibration)
+            else:  # 'None'
+                self.diameter_label.setText("Syringe diameter [mm]:")
+                self.pitch_label.setText("Thread Pitch [mm/rev]:")
+                self.diameter_inputs[fc_index].clear()
+                self.pitch_inputs[fc_index].clear()
+                self.diameter_inputs[fc_index].setEnabled(False)
+                self.pitch_inputs[fc_index].setEnabled(False)
+        finally:
+            self.diameter_inputs[fc_index].blockSignals(False)
+            self.pitch_inputs[fc_index].blockSignals(False)
 
-    def diameter_onchange(self, pump):
-        # Method that updates the diameter of a pump
-        # If the diameter is changed, update the syringe_pumps object
-        if pump == 'pump1':
-            if self.diameter_dropdown1.currentText() == '16 mm (12 mL)':
-                self.syringe_pumps.set_diameter(0, 16)
-            elif self.diameter_dropdown1.currentText() == '8 mm (3 mL)':
-                self.syringe_pumps.set_diameter(0, 8)
-            elif self.diameter_dropdown1.currentText() == '4.7 mm (1 mL)':
-                self.syringe_pumps.set_diameter(0, 4.7)
-            elif self.diameter_dropdown1.currentText() == '14 mm (10 mL)':
-                self.syringe_pumps.set_diameter(0, 14.3)
-        elif pump == 'pump2':
-            if self.diameter_dropdown2.currentText() == '16 mm (12 mL)':
-                self.syringe_pumps.set_diameter(1, 16)
-            elif self.diameter_dropdown2.currentText() == '8 mm (3 mL)':
-                self.syringe_pumps.set_diameter(1, 8)
-            elif self.diameter_dropdown2.currentText() == '4.7 mm (1 mL)':
-                self.syringe_pumps.set_diameter(1, 4.7)
-            elif self.diameter_dropdown2.currentText() == '14 mm (10 mL)':
-                self.syringe_pumps.set_diameter(1, 14.3)
+    def fc_pump_parameter_input_onchange(self, fc_index):
+        pump_type = self.pump_type_dropdowns[fc_index].currentText()
+        try:
+            if pump_type == 'Syringe':
+                diameter = float(self.diameter_inputs[fc_index].text())
+                pitch = float(self.pitch_inputs[fc_index].text())
+                self.fc_pump_settings_syringe_signal.emit(fc_index, diameter, pitch)
+            elif pump_type == 'Peristaltic':
+                diameter = float(self.diameter_inputs[fc_index].text())
+                calibration = float(self.pitch_inputs[fc_index].text())
+                self.fc_pump_settings_peristaltic_signal.emit(fc_index, diameter, calibration)
+        except (ValueError, IndexError):
+            pass
 
-        elif pump == 'pump3':
-            if self.diameter_dropdown3.currentText() == '16 mm (12 mL)':
-                self.syringe_pumps.set_diameter(2, 16)
-            elif self.diameter_dropdown3.currentText() == '8 mm (3 mL)':
-                self.syringe_pumps.set_diameter(2, 8)
-            elif self.diameter_dropdown3.currentText() == '4.7 mm (1 mL)':
-                self.syringe_pumps.set_diameter(2, 4.7)
-            elif self.diameter_dropdown3.currentText()=='14 mm (10 mL)':
-                self.syringe_pumps.set_diameter(2, 14.3)
-        elif pump == 'pump4':
-            if self.diameter_dropdown4.currentText() == '16 mm (12 mL)':
-                self.syringe_pumps.set_diameter(3, 16)
-            elif self.diameter_dropdown4.currentText() == '8 mm (3 mL)':
-                self.syringe_pumps.set_diameter(3, 8)
-            elif self.diameter_dropdown4.currentText() == '4.7 mm (1 mL)':
-                self.syringe_pumps.set_diameter(3, 4.7)
-            elif self.diameter_dropdown4.currentText() == '14 mm (10 mL)':
-                self.syringe_pumps.set_diameter(4, 14.3)
+    def fc_PID_input_onchange(self, fc_index, parameter):
+        try:
+            kp = float(self.proportional_inputs[fc_index].text())
+            ki = float(self.integral_inputs[fc_index].text())
+            kd = float(self.derivative_inputs[fc_index].text())
+            self.fc_PID_change_signal.emit(fc_index, kp, ki, kd)
+        except (ValueError, IndexError):
+            pass
 
-    def update_running(self, message):
-        self.running = message
-        print('update running')
+    def fc_mode_on_change(self, fc_index):
+        try:
+            mode = self.flow_controller_dropdowns[fc_index].currentText()
+            pid_inputs = [self.proportional_inputs[fc_index], self.integral_inputs[fc_index],
+                          self.derivative_inputs[fc_index]]
+            is_pid_mode = (mode == 'PID')
+            for widget in pid_inputs:
+                widget.setEnabled(is_pid_mode)
+                widget.setStyleSheet("background-color: black" if is_pid_mode else "background-color: rgb(30, 31, 34)")
+            self.fc_mode_change_signal.emit(fc_index, mode)
+        except IndexError:
+            pass
 
-    def update_connected(self, message):
-        print('update connected')
-        self.connected = message
+    def fc_sensor_on_change(self, fc_index):
+        try:
+            state = self.sensor_dropdowns[fc_index].currentText()
+            dropdown = self.flow_controller_dropdowns[fc_index]
+            pid_exists = dropdown.findText('PID') != -1
+            if state == 'On':
+                self.fc_sensor_change_signal.emit(fc_index, True)
+                if not pid_exists:
+                    dropdown.addItem('PID')
+            else:
+                self.fc_sensor_change_signal.emit(fc_index, False)
+                if pid_exists:
+                    if dropdown.currentText() == 'PID':
+                        dropdown.setCurrentText('Constant')
+                    dropdown.removeItem(dropdown.findText('PID'))
 
-    def update_recording(self, message):
-        print('update recording')
+            any_sensor_enabled = any(fc.sensor for fc in self.flow_controllers.flow_controllers)
+            if any_sensor_enabled and not self.flow_controllers.continuous_reading:
+                self.fc_continuous_reading_signal.emit(True)
+            elif not any_sensor_enabled and self.flow_controllers.continuous_reading:
+                self.fc_continuous_reading_signal.emit(False)
+        except IndexError:
+            pass
+
+    def tc_enable_onchange(self, tc_index):
+        try:
+            enabled = self.temp_enable_checkboxes[tc_index].isChecked()
+            self.tc_enable_change_signal.emit(tc_index, enabled)
+        except IndexError:
+            pass
+
+    def tc_target_temp_onchange(self, tc_index):
+        try:
+            target_temp = float(self.target_temp_inputs[tc_index].text())
+            self.tc_target_temp_change_signal.emit(tc_index, target_temp)
+        except (ValueError, IndexError):
+            pass
+
+    def tc_PID_input_onchange(self, tc_index, parameter):
+        try:
+            kp = float(self.temp_proportional_inputs[tc_index].text())
+            ki = float(self.temp_integral_inputs[tc_index].text())
+            kd = float(self.temp_derivative_inputs[tc_index].text())
+            self.tc_PID_change_signal.emit(tc_index, kp, ki, kd)
+        except (ValueError, IndexError):
+            pass
+
+    def tc_sensor_on_change(self, tc_index):
+        try:
+            state = self.temp_sensor_dropdowns[tc_index].currentText()
+            is_enabled = (state == 'On')
+            self.tc_sensor_change_signal.emit(tc_index, is_enabled)
+            any_sensor_enabled = any(tc.sensor for tc in self.temp_controllers.temperature_controllers)
+            if any_sensor_enabled and not self.temp_controllers.continuous_reading:
+                self.tc_continuous_reading_signal.emit(True)
+            elif not any_sensor_enabled and self.temp_controllers.continuous_reading:
+                self.tc_continuous_reading_signal.emit(False)
+        except IndexError:
+            pass
+
+    def do_start_stop_onclick(self):
+        if self.do_sensor_start_button.text() == "Start DO Reading":
+            self.do_sensor_start_button.setText("Stop DO Reading")
+            self.do_start_stop_signal.emit(True)
+        else:
+            self.do_sensor_start_button.setText("Start DO Reading")
+            self.do_start_stop_signal.emit(False)
+
+    def do_enable_onchange(self, sensor_index):
+        try:
+            enabled = self.do_sensor_enables_checkboxes[sensor_index].isChecked()
+            self.do_enable_change_signal.emit(sensor_index, enabled)
+        except IndexError:
+            pass
+
+    def do_fluid_onchange(self):
+        pass
+
+    def do_units_onchange(self):
+        pass
+
+    def update_connected(self, is_connected):
+        self.connected = is_connected
 
     def load_config(self, file_path):
-        # Open a file dialog to select a configuration file for loading
-        # Load configuration from the specified file
+        if not os.path.exists(file_path):
+            self.log_widget.append(f"Configuration file not found: {file_path}")
+            return
         config = configparser.ConfigParser()
         config.read(file_path)
-        # print on log
         self.log_widget.append(f'Loaded configuration from {file_path}')
-        # Update UI elements with the loaded configuration
-        self.flow_rate_input1.setText(config.get('Pump1', 'FlowRate'))
-        self.proportional_input1.setText(config.get('Pump1', 'KP'))
-        self.integral_input1.setText(config.get('Pump1', 'KI'))
-        self.derivative_input1.setText(config.get('Pump1', 'KD'))
-        mode = str(config.get('Pump1', 'Mode'))
-        if mode == 'pid':
-            self.pump1_dropdown.setCurrentText('PID')
-        elif mode == 'constant':
-            self.pump1_dropdown.setCurrentText('Constant')
-        elif mode == 'fill':
-            self.pump1_dropdown.setCurrentText('Fill')
-        elif mode == 'empty':
-            self.pump1_dropdown.setCurrentText('Empty')
-        else:
-            self.pump1_dropdown.setCurrentText('Off')
-        if str(config.get('Pump1', 'Sensor')) == 'on':
-            self.sensor1_dropdown.setCurrentText('On')
-        else:
-            self.sensor1_dropdown.setCurrentText('Off')
+        for i in range(self.num_flow_controllers):
+            section = f'Flow Controller {i + 1}'
+            if not config.has_section(section): continue
+            pump_type = config.get(section, 'PumpType', fallback='Syringe')
+            self.pump_type_dropdowns[i].setCurrentText(pump_type)
+            self.flow_rate_inputs[i].setText(config.get(section, 'FlowRate', fallback='0'))
+            self.proportional_inputs[i].setText(config.get(section, 'KP', fallback='0'))
+            self.integral_inputs[i].setText(config.get(section, 'KI', fallback='0'))
+            self.derivative_inputs[i].setText(config.get(section, 'KD', fallback='0'))
+            self.flow_controller_dropdowns[i].setCurrentText(
+                config.get(section, 'Mode', fallback='Constant').capitalize())
+            self.sensor_dropdowns[i].setCurrentText(config.get(section, 'Sensor', fallback='Off').capitalize())
+            fc = self.flow_controllers.flow_controllers[i]
+            if fc.pump_type == 'Syringe':
+                self.diameter_inputs[i].setText(config.get(section, 'SyringeDiameter', fallback=str(fc.diameter)))
+                self.pitch_inputs[i].setText(config.get(section, 'ThreadPitch', fallback=str(fc.thread_pitch)))
+            elif fc.pump_type == 'Peristaltic':
+                self.diameter_inputs[i].setText(config.get(section, 'TubeDiameter', fallback=str(fc.tube_diameter)))
+                self.pitch_inputs[i].setText(
+                    config.get(section, 'CalibrationFactor', fallback=str(fc.peristaltic_calibration)))
 
-        diameter = str(config.get('Pump1', 'Diameter'))
-        if diameter == '16':
-            self.diameter_dropdown1.setCurrentText('16 mm (12 mL)')
-        elif diameter == '8':
-            self.diameter_dropdown1.setCurrentText('8 mm (3 mL)')
-        elif diameter == '4.7':
-            self.diameter_dropdown1.setCurrentText('4.7 mm (1 mL)')
+            self.fc_control_enable[i].setChecked(config.get(section, 'enable', fallback='off').lower() == 'on')
+            self.fc_control_volume_inputs[i].setText(config.get(section, 'dispense_volume', fallback='0'))
+            self.fc_control_rate_inputs[i].setText(config.get(section, 'dispense_flowrate', fallback='0'))
 
-        self.flow_rate_input2.setText(config.get('Pump2', 'FlowRate'))
-        self.proportional_input2.setText(config.get('Pump2', 'KP'))
-        self.integral_input2.setText(config.get('Pump2', 'KI'))
-        self.derivative_input2.setText(config.get('Pump2', 'KD'))
-        self.pump2_dropdown.setCurrentText(config.get('Pump2', 'Mode'))
-        diameter = config.get('Pump2', 'Diameter')
-        self.sensor2_dropdown.setCurrentText(config.get('Pump2', 'Sensor'))
-        if diameter == '16':
-            self.diameter_dropdown2.setCurrentText('16 mm (12 mL)')
-        elif diameter == '8':
-            self.diameter_dropdown2.setCurrentText('8 mm (3 mL)')
-        elif diameter == '4.7':
-            self.diameter_dropdown2.setCurrentText('4.7 mm (1 mL)')
+        for i in range(self.num_temp_controllers):
+            section = f'Temp Controller {i + 1}'
+            if not config.has_section(section): continue
+            self.temp_enable_checkboxes[i].setChecked(
+                config.get(section, 'enable', fallback='Off').capitalize() == 'On')
+            self.target_temp_inputs[i].setText(config.get(section, 'target_temp', fallback='0'))
+            self.temp_proportional_inputs[i].setText(config.get(section, 'kp', fallback='0'))
+            self.temp_integral_inputs[i].setText(config.get(section, 'ki', fallback='0'))
+            self.temp_derivative_inputs[i].setText(config.get(section, 'kd', fallback='0'))
+            self.temp_sensor_dropdowns[i].setCurrentText(config.get(section, 'sensor', fallback='Off').capitalize())
 
-        self.flow_rate_input3.setText(config.get('Pump3', 'FlowRate'))
-        self.proportional_input3.setText(config.get('Pump3', 'KP'))
-        self.integral_input3.setText(config.get('Pump3', 'KI'))
-        self.derivative_input3.setText(config.get('Pump3', 'KD'))
-        self.pump3_dropdown.setCurrentText(config.get('Pump3', 'Mode'))
-        self.sensor3_dropdown.setCurrentText(config.get('Pump3', 'Sensor'))
-        diameter = config.get('Pump3', 'Diameter')
-
-        sensor = config.get('Pump4', 'Sensor')
-        if sensor == 'on':
-            self.sensor3_dropdown.setCurrentText('On')
-        else:
-            self.sensor3_dropdown.setCurrentText('Off')
-        if diameter == '16':
-            self.diameter_dropdown3.setCurrentText('16 mm (12 mL)')
-        elif diameter == '8':
-            self.diameter_dropdown3.setCurrentText('8 mm (3 mL)')
-        elif diameter == '4.7':
-            self.diameter_dropdown3.setCurrentText('4.7 mm (1 mL)')
-
-        self.flow_rate_input4.setText(config.get('Pump4', 'FlowRate'))
-        self.proportional_input4.setText(config.get('Pump4', 'KP'))
-        self.integral_input4.setText(config.get('Pump4', 'KI'))
-        self.derivative_input4.setText(config.get('Pump4', 'KD'))
-        self.pump4_dropdown.setCurrentText(config.get('Pump4', 'Mode'))
-        diameter = config.get('Pump4', 'Diameter')
-        sensor = config.get('Pump4', 'Sensor')
-        if sensor == 'on':
-            self.sensor4_dropdown.setCurrentText('On')
-        else:
-            self.sensor4_dropdown.setCurrentText('Off')
-        if diameter == '16':
-            self.diameter_dropdown4.setCurrentText('16 mm (12 mL)')
-        elif diameter == '8':
-            self.diameter_dropdown4.setCurrentText('8 mm (3 mL)')
-        elif diameter == '4.7':
-            self.diameter_dropdown4.setCurrentText('4.7 mm (1 mL)')
-
-        # Update syringe_pumps object with loaded config
-        self.mode_on_change('pump1')
-        self.mode_on_change('pump2')
-        self.mode_on_change('pump3')
-        self.mode_on_change('pump4')
-
-        self.sensor_on_change('pump1')
-        self.sensor_on_change('pump2')
-        self.sensor_on_change('pump3')
-        self.sensor_on_change('pump4')
-
-        self.flowrate_input_onchange('pump1')
-        self.flowrate_input_onchange('pump2')
-        self.flowrate_input_onchange('pump3')
-        self.flowrate_input_onchange('pump4')
-
-        self.PID_input_onchange('pump1', 'proportional')
-        self.PID_input_onchange('pump1', 'integral')
-        self.PID_input_onchange('pump1', 'derivative')
-        self.PID_input_onchange('pump2', 'proportional')
-        self.PID_input_onchange('pump2', 'integral')
-        self.PID_input_onchange('pump2', 'derivative')
-        self.PID_input_onchange('pump3', 'proportional')
-        self.PID_input_onchange('pump3', 'integral')
-        self.PID_input_onchange('pump3', 'derivative')
-        self.PID_input_onchange('pump4', 'proportional')
-        self.PID_input_onchange('pump4', 'integral')
-        self.PID_input_onchange('pump4', 'derivative')
-
-        self.diameter_onchange('pump1')
-        self.diameter_onchange('pump2')
-        self.diameter_onchange('pump3')
-        self.diameter_onchange('pump4')
+        self.do_sensor_enables_checkboxes[0].setChecked(
+            config.get('DO Sensors', 'enable_1', fallback='off').lower() == 'on')
+        self.do_sensor_enables_checkboxes[1].setChecked(
+            config.get('DO Sensors', 'enable_2', fallback='off').lower() == 'on')
+        self.do_sensor_fluid_dropdown.setCurrentText(config.get('DO Sensors', 'fluid', fallback='Water').capitalize())
+        self.do_sensor_units_dropdown.setCurrentText(config.get('DO Sensors', 'units', fallback='Raw [V]'))
 
     def load_config_button_onclick(self):
         file_path, _ = QFileDialog.getOpenFileName(self, 'Load Configuration File', '', 'INI Files (*.ini)')
         if file_path:
             self.load_config(file_path)
 
+    def on_sequence_started(self):
+        """Slot for when the sequence starts. Updates the GUI."""
+        self.load_sequence_button.setText("Stop Sequence")
+        self._set_controls_enabled(False)
+
+    def on_sequence_finished(self):
+        """Slot for when the sequence finishes or is stopped. Updates the GUI."""
+        self.load_sequence_button.setText("Load Sequence")
+        self._set_controls_enabled(True)
+        # Also stop any logging that was initiated by the sequence, if it's still running
+        if self.recording:
+            self.stop_logging(initiated_by='Sequence End')
 
     def sequence_onclick(self):
-        if self.connected:
-            sequence_file, _ = QFileDialog.getOpenFileName(self, 'Load Sequence File', '', 'JSON Files (*.json)')
+        """Handles the click of the 'Load/Stop Sequence' button."""
+        if self.sequence_runner.is_running():
+            # Invoke the stop method on the sequence runner's thread
+            QMetaObject.invokeMethod(self.sequence_runner, "stop_sequence", Qt.QueuedConnection)
+        elif self.connected:
+            sequence_file, _ = QFileDialog.getOpenFileName(self, 'Load Sequence File', '', 'TOML Files (*.toml)')
             if sequence_file:
-                self.sequence_runner.load_sequence(sequence_file)
-                self.load_sequence_button.setText("Stop")
-                # Disable the parameter QtextEdits
-                self.proportional_input1.setDisabled(True)
-                self.proportional_input2.setDisabled(True)
-                self.proportional_input3.setDisabled(True)
-                self.proportional_input4.setDisabled(True)
-                self.derivative_input1.setDisabled(True)
-                self.derivative_input2.setDisabled(True)
-                self.derivative_input3.setDisabled(True)
-                self.derivative_input4.setDisabled(True)
-                self.integral_input1.setDisabled(True)
-                self.integral_input2.setDisabled(True)
-                self.integral_input3.setDisabled(True)
-                self.integral_input4.setDisabled(True)
+                # Emit a signal to have the sequence runner load and start the file on its own thread
+                self.load_and_start_sequence_signal.emit(sequence_file)
         else:
-            self.load_sequence_button.setText("Load Sequence")
-            # Enable the parameter QtextEdits
-            self.proportional_input1.setDisabled(False)
-            self.proportional_input2.setDisabled(False)
-            self.proportional_input3.setDisabled(False)
-            self.proportional_input4.setDisabled(False)
-            self.derivative_input1.setDisabled(False)
-            self.derivative_input2.setDisabled(False)
-            self.derivative_input3.setDisabled(False)
-            self.derivative_input4.setDisabled(False)
-            self.integral_input1.setDisabled(False)
-            self.integral_input2.setDisabled(False)
-            self.integral_input3.setDisabled(False)
-            self.integral_input4.setDisabled(False)
-            self.gui_updater.update_log('Please connect to the Arduino before starting a sequence')
+            self.gui_updater.update_log('Please connect to the MCU before starting a sequence')
 
+    def update_flow_rate_input(self, controller_index, rate):
+        """Updates the flow rate input field from a sequence event."""
+        if 0 <= controller_index < self.num_flow_controllers:
+            self.flow_rate_inputs[controller_index].setText(str(rate))
+
+    def update_pump_enable_checkbox(self, controller_index, enabled):
+        """Updates the pump enable checkbox from a sequence event."""
+        if 0 <= controller_index < self.num_flow_controllers:
+            checkbox = self.fc_control_enable[controller_index]
+            # Block signals to prevent the checkbox's stateChanged signal from firing,
+            # which would cause a redundant command to be sent.
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(enabled))
+            checkbox.blockSignals(False)
+            # Force the application to process events to ensure the UI repaints immediately.
+            QApplication.processEvents()
+
+    def update_temperature_input(self, controller_index, temp):
+        """Updates the temperature input field from a sequence event."""
+        if 0 <= controller_index < self.num_temp_controllers:
+            self.target_temp_inputs[controller_index].setText(str(temp))
+
+    def update_heater_enable_checkbox(self, controller_index, enabled):
+        """Updates the heater enable checkbox from a sequence event."""
+        if 0 <= controller_index < self.num_temp_controllers:
+            checkbox = self.temp_enable_checkboxes[controller_index]
+            # Block signals to prevent the checkbox's stateChanged signal from firing.
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(enabled))
+            checkbox.blockSignals(False)
+            # Force the application to process events to ensure the UI repaints immediately.
+            QApplication.processEvents()
 
     def save_config_button_onclick(self):
-
+        """Saves the current state of all UI controls to a configuration file."""
         file_path, _ = QFileDialog.getSaveFileName(self, 'Save Configuration File', '', 'INI Files (*.ini)')
-        if file_path:
-            # Save configuration to the specified file
-            config = configparser.ConfigParser()
+        if not file_path:
+            return
 
-            # Add sections for each pump
-            config.add_section('Pump1')
-            config.add_section('Pump2')
-            config.add_section('Pump3')
-            config.add_section('Pump4')
+        config = configparser.ConfigParser()
 
-            # Add key-value pairs for each parameter
-            config.set('Pump1', 'FlowRate', self.flow_rate_input1.text())
-            config.set('Pump1', 'KP', self.proportional_input1.text())
-            config.set('Pump1', 'KI', self.integral_input1.text())
-            config.set('Pump1', 'KD', self.derivative_input1.text())
-            config.set('Pump1', 'Mode', self.pump1_dropdown.currentText())
+        # --- Save Flow Controller Settings ---
+        for i in range(self.num_flow_controllers):
+            section = f'Flow Controller {i + 1}'
+            config.add_section(section)
 
-            config.set('Pump2', 'FlowRate', self.flow_rate_input2.text())
-            config.set('Pump2', 'KP', self.proportional_input2.text())
-            config.set('Pump2', 'KI', self.integral_input2.text())
-            config.set('Pump2', 'KD', self.derivative_input2.text())
-            config.set('Pump2', 'Mode', self.pump2_dropdown.currentText())
+            config.set(section, 'flowrate', self.flow_rate_inputs[i].text())
+            config.set(section, 'kp', self.proportional_inputs[i].text())
+            config.set(section, 'ki', self.integral_inputs[i].text())
+            config.set(section, 'kd', self.derivative_inputs[i].text())
+            config.set(section, 'mode', self.flow_controller_dropdowns[i].currentText().lower())
 
-            config.set('Pump3', 'FlowRate', self.flow_rate_input3.text())
-            config.set('Pump3', 'KP', self.proportional_input3.text())
-            config.set('Pump3', 'KI', self.integral_input3.text())
-            config.set('Pump3', 'KD', self.derivative_input3.text())
-            config.set('Pump3', 'Mode', self.pump3_dropdown.currentText())
+            pump_type = self.pump_type_dropdowns[i].currentText().lower()
+            config.set(section, 'pump_type', pump_type)
+            if pump_type == 'syringe':
+                config.set(section, 'syringe_diameter', self.diameter_inputs[i].text())
+                config.set(section, 'thread_pitch', self.pitch_inputs[i].text())
+            elif pump_type == 'peristaltic':
+                config.set(section, 'tube_diameter', self.diameter_inputs[i].text())
+                config.set(section, 'calibration', self.pitch_inputs[i].text())
 
-            config.set('Pump4', 'FlowRate', self.flow_rate_input1.text())
-            config.set('Pump4', 'KP', self.proportional_input1.text())
-            config.set('Pump4', 'KI', self.integral_input1.text())
-            config.set('Pump4', 'KD', self.derivative_input1.text())
-            config.set('Pump4', 'Mode', self.pump4_dropdown.currentText())
+            config.set(section, 'sensor', 'on' if self.sensor_dropdowns[i].currentText() == 'On' else 'off')
+            config.set(section, 'enable', 'on' if self.fc_control_enable[i].isChecked() else 'off')
+            config.set(section, 'dispense_volume', self.fc_control_volume_inputs[i].text())
+            config.set(section, 'dispense_flowrate', self.fc_control_rate_inputs[i].text())
 
-            # Save the configuration to the file
+        # --- Save Temperature Controller Settings ---
+        for i in range(self.num_temp_controllers):
+            section = f'Temp Controller {i + 1}'
+            config.add_section(section)
+            config.set(section, 'target_temp', self.target_temp_inputs[i].text())
+            config.set(section, 'kp', self.temp_proportional_inputs[i].text())
+            config.set(section, 'ki', self.temp_integral_inputs[i].text())
+            config.set(section, 'kd', self.temp_derivative_inputs[i].text())
+            config.set(section, 'sensor', 'on' if self.temp_sensor_dropdowns[i].currentText() == 'On' else 'off')
+            config.set(section, 'enable', 'on' if self.temp_enable_checkboxes[i].isChecked() else 'off')
+
+        # --- Save DO Sensor Settings ---
+        section = 'DO Sensors'
+        config.add_section(section)
+        config.set(section, 'enable_1', 'on' if self.do_sensor_enables_checkboxes[0].isChecked() else 'off')
+        config.set(section, 'enable_2', 'on' if self.do_sensor_enables_checkboxes[1].isChecked() else 'off')
+        config.set(section, 'fluid', self.do_sensor_fluid_dropdown.currentText().lower())
+        config.set(section, 'units', self.do_sensor_units_dropdown.currentText())
+
+        try:
             with open(file_path, 'w') as config_file:
                 config.write(config_file)
+            self.log_widget.append(f"Configuration successfully saved to {file_path}")
+        except IOError as e:
+            self.log_widget.append(f"Error saving configuration: {e}")
+    def start_logging(self, filepath, initiated_by='Manual'):
+        """Starts saving sensor data to a file."""
+        if self.recording:
+            self.stop_logging()  # Stop previous log first
+
+        if not filepath:
+            return
+        if initiated_by == "manual":
+            self.log_widget.append(f'{initiated_by} logging started to {filepath}')
+        self.start_logging_signal.emit(filepath)
+        self.recording = True
+        self.save_data_button.setText('Stop Recording')
+
+    def stop_logging(self, initiated_by='Manual'):
+        """Stops saving sensor data."""
+        if not self.recording:
+            return
+
+        self.log_widget.append(f"{initiated_by} logging stopped.")
+        self.stop_logging_signal.emit()
+        self.recording = False
+        self.save_data_button.setText('Log Data')
 
     def save_data_button_onclick(self):
-        # Open a file dialog to select a file for saving the data
-        # Save the data to the specified file
-        if self.recording == False:
-            filepath = QFileDialog.getSaveFileName(self, 'Save Data', '', 'CSV Files (*.csv)')
+        """Handles the click of the 'Log Data' button."""
+        if not self.recording:
+            filepath, _ = QFileDialog.getSaveFileName(self, 'Save Data', '', 'CSV Files (*.csv)')
             if filepath:
-                #Check if filepath already exists
-                if os.path.exists(filepath[0]):
-                    #increment filename
-                    filename = filepath[0].split('.csv')[0]
-                    filename = filename + '_1.csv'
-                    filepath = filename
-                else:
-                    filepath = filepath[0]
-                    self.log_widget.append(f'Saving data to {filepath}')
-
-                print(filepath)
-
-                self.data_saver.set_filename(filepath)
-                self.data_saver.start_save()
-                self.recording = True
-                self.save_data_button.setText('Stop Recording')
-                #Send command to arduino to reset time
-                self.arduino_logging_signal.emit()
-                self.arduino_thread.sensor_signal.connect(self.data_saver.save_data)
+                self.start_logging(filepath, initiated_by='Manual')
         else:
-            #self.data_saver.stop_save()
-            self.recording = False
-            self.save_data_button.setText('Log Data')
-            self.data_saver_stop_signal.emit()
-            self.arduino_thread.sensor_signal.disconnect(self.data_saver.save_data)
+            self.stop_logging(initiated_by='Manual')
 
 
+    def load_data_button_onclick(self):
+        pass
 
+    # --- Slots for Sequence Runner Commands ---
+    def on_sequence_start_logging(self, filepath):
+        """Slot to start logging from a sequence event."""
+        self.start_logging(filepath, initiated_by='Sequence')
 
-    def mode_on_change(self, pump):
-        # Method that updates the GUI for different modes
-        # If the mode is set to PID, enable the PID parameter input boxes
-        # If the mode is set to Constant, Change input boxes to thread and syringue diameter
-        # If the mode is set to Off, disable all input boxes
-        print(pump)
-        if pump == 'pump1':
-            mode = self.pump1_dropdown.currentText()
-            if mode == 'PID':
-                self.proportional_input1.setEnabled(True)
-                self.integral_input1.setEnabled(True)
-                self.derivative_input1.setEnabled(True)
-                self.proportional_input1.setStyleSheet("background-color: black")
-                self.integral_input1.setStyleSheet("background-color: black")
-                self.derivative_input1.setStyleSheet("background-color: black")
-            elif mode == 'Constant':
-                self.proportional_input1.setEnabled(False)
-                self.integral_input1.setEnabled(False)
-                self.derivative_input1.setEnabled(False)
-                self.proportional_input1.setStyleSheet("background-color: black")
-                self.integral_input1.setStyleSheet("background-color: black")
-                self.derivative_input1.setStyleSheet("background-color: black")
-            elif mode == 'Off':
-                self.proportional_input1.setEnabled(False)
-                self.integral_input1.setEnabled(False)
-                self.derivative_input1.setEnabled(False)
-                # Set background to grey
-                self.proportional_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
+    def on_sequence_stop_logging(self):
+        """Slot to stop logging from a sequence event."""
+        self.stop_logging(initiated_by='Sequence')
 
-            elif mode == 'Fill':
-                self.proportional_input1.setEnabled(False)
-                self.integral_input1.setEnabled(False)
-                self.derivative_input1.setEnabled(False)
-                # Set background to grey
-                self.proportional_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
+    def reset_plot_button_onclick(self):
+        print("Resetting plots and clearing data buffers...")
+        self.do_plot_widget.clear()
+        self.temp_plot_widget.clear()
+        self.flowrate_plot_widget.clear()
+        self.clear_plots_signal.emit()
 
-            elif mode == 'Empty':
-                self.proportional_input1.setEnabled(False)
-                self.integral_input1.setEnabled(False)
-                self.derivative_input1.setEnabled(False)
-                # Set background to grey
-                self.proportional_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input1.setStyleSheet("background-color: rgb(30, 31, 34)")
+    def closeEvent(self, event):
+        """Ensure threads are stopped cleanly on application close."""
+        print("Closing application...")
+        # Stop sequence runner on its own thread, wait for it to finish
+        QMetaObject.invokeMethod(self.sequence_runner, "stop_sequence", Qt.BlockingQueuedConnection)
+        self.mcu_disconnect_signal.emit()  # Ensure MCU is disconnected
 
-            # Set mode in syringe_pumps object
-            self.syringe_pumps.set_mode(0, mode)
+        self.mcu_thread.quit()
+        self.mcu_thread.wait()
 
-        elif pump == 'pump2':
-            mode = self.pump2_dropdown.currentText()
-            if mode == 'PID':
-                self.proportional_input2.setEnabled(True)
-                self.integral_input2.setEnabled(True)
-                self.derivative_input2.setEnabled(True)
-                self.proportional_input2.setStyleSheet("background-color: black")
-                self.integral_input2.setStyleSheet("background-color: black")
-                self.derivative_input2.setStyleSheet("background-color: black")
+        self.sequence_thread.quit()
+        self.sequence_thread.wait()
 
-            elif mode == 'Constant':
-                self.proportional_input2.setEnabled(False)
-                self.integral_input2.setEnabled(False)
-                self.derivative_input2.setEnabled(False)
-                self.proportional_input2.setStyleSheet("background-color: black")
-                self.integral_input2.setStyleSheet("background-color: black")
-                self.derivative_input2.setStyleSheet("background-color: black")
-            elif mode == 'Off':
-                self.proportional_input2.setEnabled(False)
-                self.integral_input2.setEnabled(False)
-                self.derivative_input2.setEnabled(False)
-                self.proportional_input2.setStyleSheet("background-color:rgb(30, 31, 34)")
-                self.integral_input2.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input2.setStyleSheet("background-color: rgb(30, 31, 34)")
+        self.data_saver_thread.quit()
+        self.data_saver_thread.wait()
 
-            elif mode == 'Fill':
-                self.proportional_input2.setEnabled(False)
-                self.integral_input2.setEnabled(False)
-                self.derivative_input2.setEnabled(False)
-                self.proportional_input2.setStyleSheet("background-color:rgb(30, 31, 34)")
-                self.integral_input2.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input2.setStyleSheet("background-color: rgb(30, 31, 34)")
+        # You should add similar shutdown logic for your other threads.
+        event.accept()
 
-            elif mode == 'Empty':
-                self.proportional_input2.setEnabled(False)
-                self.integral_input2.setEnabled(False)
-                self.derivative_input2.setEnabled(False)
-                self.proportional_input2.setStyleSheet("background-color:rgb(30, 31, 34)")
-                self.integral_input2.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input2.setStyleSheet("background-color: rgb(30, 31, 34)")
-
-            # Set mode in syringe_pumps object
-            self.syringe_pumps.set_mode(1, mode)
-
-        elif pump == 'pump3':
-            mode = self.pump3_dropdown.currentText()
-            if mode == 'PID':
-                self.proportional_input3.setEnabled(True)
-                self.integral_input3.setEnabled(True)
-                self.derivative_input3.setEnabled(True)
-
-            elif mode == 'Constant':
-                self.proportional_input3.setEnabled(False)
-                self.integral_input3.setEnabled(False)
-                self.derivative_input3.setEnabled(False)
-            elif mode == 'Off':
-                self.proportional_input3.setEnabled(False)
-                self.integral_input3.setEnabled(False)
-                self.derivative_input3.setEnabled(False)
-                self.proportional_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-
-            elif mode == 'Fill':
-                self.proportional_input3.setEnabled(False)
-                self.integral_input3.setEnabled(False)
-                self.derivative_input3.setEnabled(False)
-                self.proportional_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-            elif mode == 'Empty':
-                self.proportional_input3.setEnabled(False)
-                self.integral_input3.setEnabled(False)
-                self.derivative_input3.setEnabled(False)
-                self.proportional_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input3.setStyleSheet("background-color: rgb(30, 31, 34)")
-
-            # Set mode in syringe_pumps object
-            self.syringe_pumps.set_mode(2, mode)
-
-        elif pump == 'pump4':
-            mode = self.pump4_dropdown.currentText()
-            if mode == 'PID':
-                self.proportional_input4.setEnabled(True)
-                self.integral_input4.setEnabled(True)
-                self.derivative_input4.setEnabled(True)
-            elif mode == 'Constant':
-                self.proportional_input4.setEnabled(False)
-                self.integral_input4.setEnabled(False)
-                self.derivative_input4.setEnabled(False)
-            elif mode == 'Off':
-                self.proportional_input4.setEnabled(False)
-                self.integral_input4.setEnabled(False)
-                self.derivative_input4.setEnabled(False)
-                self.proportional_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-            elif mode == 'Fill':
-                self.proportional_input4.setEnabled(False)
-                self.integral_input4.setEnabled(False)
-                self.derivative_input4.setEnabled(False)
-                self.proportional_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-            elif mode == 'Empty':
-                self.proportional_input4.setEnabled(False)
-                self.integral_input4.setEnabled(False)
-                self.derivative_input4.setEnabled(False)
-                self.proportional_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.integral_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-                self.derivative_input4.setStyleSheet("background-color: rgb(30, 31, 34)")
-            # Set mode in syringe_pumps object
-            self.syringe_pumps.set_mode(3, mode)
-
-    def sensor_on_change(self, pump):
-        # Method that updates the GUI for different sensor options
-        print(pump)
-        if pump == 'pump1':
-            state = self.sensor1_dropdown.currentText()
-            print(state)
-            print(type(state))
-            if state == 'On':
-                self.syringe_pumps.set_sensor(0, 1)
-                # if sensor is on add PID item to Combobox
-                # Check if PID is already in Combobox first
-                if self.pump1_dropdown.findText('PID') == -1:
-                    self.pump1_dropdown.addItem('PID')
-            else:
-                self.syringe_pumps.set_sensor(0, 0)
-                # if sensor is off remove PID mode from Combobox
-                # Find index of PID mode
-                if self.pump1_dropdown.findText('PID') != -1:
-                    idx = self.pump1_dropdown.findText('PID')
-                    self.pump1_dropdown.removeItem(idx)
-                # If mode is PID set mode to constant
-                if self.pump1_dropdown.currentText() == 'PID':
-                    self.pump1_dropdown.setCurrentText('Constant')
-
-            # print info
-
-        elif pump == 'pump2':
-            state = self.sensor2_dropdown.currentText()
-            if state == 'On':
-                self.syringe_pumps.set_sensor(1, 1)
-                # if sensor is on add PID item to Combobox
-                # Check if PID is already in Combobox first
-                if self.pump2_dropdown.findText('PID') == -1:
-                    self.pump2_dropdown.addItem('PID')
-            else:
-                self.syringe_pumps.set_sensor(1, 0)
-                # if sensor is off remove PID mode from Combobox
-                # Find index of PID mode
-                if self.pump2_dropdown.findText('PID') != -1:
-                    idx = self.pump2_dropdown.findText('PID')
-                    self.pump2_dropdown.removeItem(idx)
-                # If mode is PID set mode to constant
-                if self.pump2_dropdown.currentText() == 'PID':
-                    self.pump2_dropdown.setCurrentText('Constant')
-
-        elif pump == 'pump3':
-            state = self.sensor3_dropdown.currentText()
-            if state == 'On':
-                # if sensor is on add PID item to Combobox
-                # Check if PID is already in Combobox first
-                if self.pump3_dropdown.findText('PID') == -1:
-                    self.pump3_dropdown.addItem('PID')
-                self.syringe_pumps.set_sensor(2, 1)
-            else:
-                self.syringe_pumps.set_sensor(2, 0)
-                # if sensor is off remove PID mode from Combobox
-                # Find index of PID mode
-                if self.pump3_dropdown.findText('PID') != -1:
-                    idx = self.pump3_dropdown.findText('PID')
-                    self.pump3_dropdown.removeItem(idx)
-                # If mode is PID set mode to constant
-                if self.pump3_dropdown.currentText() == 'PID':
-                    self.pump3_dropdown.setCurrentText('Constant')
-
-        elif pump == 'pump4':
-            state = self.sensor4_dropdown.currentText()
-            if state == 'On':
-                # if sensor is on add PID item to Combobox
-                # Check if PID is already in Combobox first
-                if self.pump4_dropdown.findText('PID') == -1:
-                    self.pump4_dropdown.addItem('PID')
-                self.syringe_pumps.set_sensor(3, 1)
-            else:
-                self.syringe_pumps.set_sensor(3, 0)
-                # if sensor is off remove PID mode from Combobox
-                # Find index of PID mode
-                if self.pump4_dropdown.findText('PID') != -1:
-                    idx = self.pump4_dropdown.findText('PID')
-                    self.pump4_dropdown.removeItem(idx)
-                # If mode is PID set mode to constant
-                if self.pump4_dropdown.currentText() == 'PID':
-                    self.pump4_dropdown.setCurrentText('Constant')
 
 # Application entry point
 if __name__ == "__main__":
-    app = QApplication([])
-    window = SyringePumpApp()
+    import sys
+
+    app = QApplication(sys.argv)
+    window = App()
     window.show()
-    app.exec_()
+    sys.exit(app.exec_())
