@@ -36,7 +36,6 @@ class DataSaver(QObject):
         self.filename = filename
         self._clear_buffers()
         self.saving = True
-        print(f"Data saver started. Will save to {self.filename} on stop.")
 
     @pyqtSlot(list)
     def save_flow_data(self, data):
@@ -79,7 +78,7 @@ class DataSaver(QObject):
             return
 
         self.saving = False
-        print(f"Stopping data saver and writing to {self.filename}...")
+        #print(f"Stopping data saver and writing to {self.filename}...")
 
         try:
             with open(self.filename, 'w', newline='') as f:
@@ -101,7 +100,7 @@ class DataSaver(QObject):
                 f.write("Timestamp (ms),DO Sensor 1 (V),DO Sensor 2 (V)\n")
                 writer.writerows(self.do_data_buffer)
 
-            print("File successfully written.")
+            #print("File successfully written.")
 
         except (IOError, TypeError) as e:
             print(f"Error writing data to file: {e}")

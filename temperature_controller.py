@@ -1,7 +1,7 @@
 import time
 
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
-from mcu_cmd import MCUCommands
+from mcu import MCUCommands
 from collections import deque
 
 
@@ -85,7 +85,7 @@ class TemperatureControllerThread(QThread):
             self.temperature_controllers[temp_controller_num].set_temperature(temperature)
             target = self.temperature_controllers[temp_controller_num].num
             command, com_id = self.commands.temp_set_temp(target, self.temperature_controllers[temp_controller_num].temperature)
-            print(f"TC Thread: Queuing command {com_id}")
+                #print(f"TC Thread: Queuing command {com_id}")
             self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
@@ -95,7 +95,7 @@ class TemperatureControllerThread(QThread):
             self.temperature_controllers[temp_controller_num].set_enable(enable)
             target = self.temperature_controllers[temp_controller_num].num
             command, com_id = self.commands.temp_start_stop(target, enable)
-            print(f"TC Thread: Queuing command {com_id}")
+                #print(f"TC Thread: Queuing command {com_id}")
             self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
@@ -108,7 +108,7 @@ class TemperatureControllerThread(QThread):
                                                 self.temperature_controllers[temp_controller_num].kp,
                                                 self.temperature_controllers[temp_controller_num].ki,
                                                 self.temperature_controllers[temp_controller_num].kd)
-            print(f"TC Thread: Queuing command {com_id}")
+                #print(f"TC Thread: Queuing command {com_id}")
             self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
@@ -118,7 +118,7 @@ class TemperatureControllerThread(QThread):
             self.temperature_controllers[temp_controller_num].set_sensor(sensor)
             target = self.temperature_controllers[temp_controller_num].num
             command, com_id = self.commands.temp_ssr_enable_disable(target, sensor)
-            print(f"TC Thread: Queuing command {com_id}")
+                #print(f"TC Thread: Queuing command {com_id}")
             self.mcu_signal.emit(command, com_id)
         else:
             raise ValueError("Invalid temperature controller number.")
@@ -127,7 +127,7 @@ class TemperatureControllerThread(QThread):
         if enable != self.continuous_reading:
             self.continuous_reading = enable
             command, com_id = self.commands.continuous_read(on=enable)
-            print(f"TC Thread: Queuing command {com_id}")
+                #print(f"TC Thread: Queuing command {com_id}")
             self.mcu_signal.emit(command, com_id)
 
     def process_temp_serial_data(self, data: list):

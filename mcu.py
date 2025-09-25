@@ -1,86 +1,173 @@
-from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QDateTime, QIODevice,QTimer
+from collections import deque
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer, QIODevice, QByteArray
+
 from PyQt5.QtSerialPort import QSerialPort, QSerialPortInfo
 
-class MCUThread(QThread):
-    #QThread object to send and receive data from the serial port
-    data_signal = pyqtSignal(str)
+class MCUCommands:
+    # This class is unchanged
+    def __init__(self):
+        self.com_id_counter = 0
+    def _generate_com_id(self):
+        self.com_id_counter += 1
+        return f"{self.com_id_counter:04d}"
+    def _calculate_checksum(self, command_body):
+        return 0
+    def _format_command(self, base_command, args):
+        com_id = self._generate_com_id()
+        if args:
+            command_part = f"{base_command}{','.join(map(str, args))}"
+        else:
+            command_part = base_command[:-1]
+        command_body = f"{command_part},{com_id},1"
+        checksum = self._calculate_checksum(command_body)
+        return f"{command_body};\n", com_id
+
+class MCUResponse(QObject):
+    # This class is unchanged
+    ok_signal = pyqtSignal(list)
+    error_signal = pyqtSignal(list)
+    flow_data_signal = pyqtSignal(list)
+    temp_data_signal = pyqtSignal(list)
+    do_data_signal = pyqtSignal(list)
+    info_signal = pyqtSignal(str)
+    OK, ERROR, FLOW, TEMP, DO = '$OK,', '$ERROR,', '$FLOW,', '$TEMP,', '$DO,'
+    def __init__(self):
+        super().__init__()
+    def parse(self, message):
+        try:
+            message_str = message.decode('utf-8').strip(';\n')
+            if not message_str: return
+            if message_str.startswith(self.FLOW):
+            # Handle flow data
+                payload = message_str[len(self.FLOW):].split(',')
+                payload[0] = int(payload[0])  # time in ms
+                for i in range(1, len(payload)):
+                    if i % 2 == 1: payload[i] = int(payload[i])
+                    elif i % 2 == 0: payload[i] = float(payload[i])
+                self.flow_data_signal.emit(payload)
+
+            elif message_str.startswith(self.TEMP):
+            # Handle temperature data
+                payload = message_str[len(self.TEMP):].split(',')
+                payload[0] = int(payload[0])  # time in ms
+                for i in range(1, len(payload)):
+                    if i % 3 == 1: payload[i] = int(payload[i])
+                    elif i % 3 == 2: payload[i] = float(payload[i])
+                    elif i % 3 == 0: payload[i] = int(payload[i])
+                self.temp_data_signal.emit(payload)
+            elif message_str.startswith(self.DO):
+            # Handle DO data
+                payload = message_str[len(self.DO):].split(',')
+                self.do_data_signal.emit([int(payload[0]), float(payload[1]), float(payload[2])])
+
+            elif message_str.startswith(self.OK): self.ok_signal.emit(message_str[len(self.OK):].split(','))
+            elif message_str.startswith(self.ERROR): self.error_signal.emit(message_str[len(self.ERROR):].split(','))
+            else: self.info_signal.emit(message_str)
+        except Exception as e: self.info_signal.emit(f"Error parsing MCU message: '{message}'. Error: {e}")
+
+class MCUWorker(QObject):
+    # Signals are unchanged
+    flow_data_received = pyqtSignal(list)
+    temp_data_received = pyqtSignal(list)
+    do_data_received = pyqtSignal(list)
+    ack_received = pyqtSignal(list)
+    error_received = pyqtSignal(list)
     log_signal = pyqtSignal(str)
-    running_signal = pyqtSignal(bool)
     connected_signal = pyqtSignal(bool)
 
     def __init__(self):
         super().__init__()
-
+        self.mcu = None
+        self.ack_timer = None
         self.connected = False
-        self.running = False
-        self.mcu = None  # Initialize the mcu variable
+        self.commands = MCUCommands()
+        self.parser = MCUResponse()
+        self.command_queue = deque()
+        self.waiting_for_com_id = None
+        self.serial_buffer = QByteArray()
+        self.ack_timeout = 500  # milliseconds
 
-    def run(self):
-        # Modify the COM port based on your setup
-        if self.running & self.mcu.canReadLine():
-            try:
-                data = self.mcu.readLine(maxlen=1000)
-                data_decoded = data.decode()
-                self.data_signal.emit(data_decoded)
+        # Connect the parser's signals
+        self.parser.flow_data_signal.connect(self.flow_data_received)
+        self.parser.temp_data_signal.connect(self.temp_data_received)
+        self.parser.do_data_signal.connect(self.do_data_received)
+        self.parser.error_signal.connect(self.error_received)
+        self.parser.info_signal.connect(self.log_signal)
+        self.parser.ok_signal.connect(self.ack_received)
+        self.parser.ok_signal.connect(self._handle_mcu_ack)
 
-            except ValueError:
-                pass
+    def _process_queue(self):
+        if self.waiting_for_com_id is None and self.command_queue:
+            command, com_id = self.command_queue.popleft()
+            if self.connected and self.mcu:
+                self.waiting_for_com_id = com_id
+                self.mcu.write(command.encode())
+                self.ack_timer.start(self.ack_timeout)
+            else:
+                self.log_signal.emit(f"Command {com_id} dropped: MCU not connected.")
 
-    def start(self):
-        print('mcu_start')
-        if self.connected and (not self.running):
-            self.log_signal.emit('start button clicked')
-            self.mcu.clear()
-            self.command = 'start\n'
-            self.mcu.write(self.command.encode())
-            self.running = True
-            self.running_signal.emit(True)
-        else:
-            pass
+    def _handle_mcu_ack(self, payload):
+        if not payload: return
+        ack_com_id = payload[0]
+        if ack_com_id == self.waiting_for_com_id:
+            self.ack_timer.stop()
+            # --- FIX: Corrected the debug print statement ---
+            self.waiting_for_com_id = None
+            # Process the next command in the queue
+            # Single shot timer is used so that process is called after the ack_timer has fully stopped
+            QTimer.singleShot(0, self._process_queue)
 
-    def stop(self):
-        if self.connected and self.running:
-            self.log_signal.emit('Stopping pumps')
-            self.command = 'stop\n'
-            self.mcu.write(self.command.encode())
-            self.running = False
-            self.running_signal.emit(False)
+    def _handle_ack_timeout(self):
+        if self.waiting_for_com_id is not None:
+            timed_out_id = self.waiting_for_com_id
+            self.waiting_for_com_id = None
+            self.log_signal.emit(f"Timeout: No ACK received for command {timed_out_id}. Moving on.")
+            self._process_queue()
 
-    def connect(self):
-        # Get a list of available COM ports
-        serial_port = QSerialPortInfo()
-        available_ports = serial_port.availablePorts()
-        for port in available_ports:
-            print(port.description())
-            if "CH340" in port.description():
-                try:
-                    # Establish a connection with the mcu
+    def read_message(self):
+        if not self.mcu: return
+        incoming_data = self.mcu.readAll()
+        self.serial_buffer.append(incoming_data)
+        while True:
+            end_of_message_pos = self.serial_buffer.indexOf(b';\n')
+            if end_of_message_pos == -1: break
+            message_length = end_of_message_pos + 2
+            message = self.serial_buffer.left(message_length)
+            self.serial_buffer = self.serial_buffer.mid(message_length)
+            try: self.parser.parse(bytes(message))
+            except Exception as e: self.log_signal.emit(f"Error during message parsing: {e}")
+
+    def submit_command(self, command, com_id):
+        self.command_queue.append((command, com_id))
+        self._process_queue()
+
+    def connect_mcu(self):
+        if self.connected: return
+        self.ack_timer = QTimer()
+        self.ack_timer.setSingleShot(True)
+        self.ack_timer.timeout.connect(self._handle_ack_timeout)
+        serial_port_info = QSerialPortInfo.availablePorts()
+        for port in serial_port_info:
+            if "USB Serial Device" in port.description():
+                self.mcu = QSerialPort()
+                self.mcu.setPortName(port.portName())
+                self.mcu.setBaudRate(QSerialPort.Baud115200)
+                if self.mcu.open(QIODevice.ReadWrite):
                     self.connected = True
-                    self.log_signal.emit(f"Connection to mcu successful on {port.portName()}")
-                    print(port.portName)
-                    self.mcu = QSerialPort(port.portName(), baudRate='BAUD9600')
-                    self.mcu.open(QIODevice.ReadWrite)
-                    self.mcu.readyRead.connect(self.run, Qt.QueuedConnection)
+                    self.mcu.readyRead.connect(self.read_message)
+                    self.log_signal.emit(f"Connection to MCU successful on {port.portName()}")
                     self.connected_signal.emit(True)
+                    return
+                else: self.log_signal.emit(f"Failed to open port {port.portName()}: {self.mcu.errorString()}")
+        self.log_signal.emit("No MCU connected")
+        self.connected_signal.emit(False)
 
-                except QSerialPort.OpenError:
-                    self.log_signal.emit(f"Failed to connect to mcu on{port.portName()}")
-                    self.connected_signal.emit(False)
-        if self.mcu == None:
-            self.log_signal.emit(f"No mcu connected")
-            self.connected_signal.emit(False)
-
-    def disconnect(self):
-        if self.mcu:
-            print('disconnect button clicked')
-            self.mcu.clear()
-            self.mcu.close()
-            self.mcu = None
-            self.connected = False
-            self.connected_signal.emit(False)
-
-    def update_flowrate(self):
-        print('updating flow rate to')
-
-    def update_PID(self):
-        print('updating pid to')
+    def disconnect_mcu(self):
+        if self.mcu and self.mcu.isOpen(): self.mcu.close()
+        if self.ack_timer: self.ack_timer.stop()
+        self.connected = False
+        self.serial_buffer.clear()
+        self.command_queue.clear()
+        self.waiting_for_com_id = None
+        self.connected_signal.emit(False)
+        self.log_signal.emit("Disconnected from MCU")

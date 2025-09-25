@@ -1,6 +1,6 @@
 ### High level commands class for the control of the syringe flow_controller
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
-from mcu_cmd import MCUCommands
+from mcu import MCUCommands
 from collections import deque
 import serial
 import time
@@ -132,7 +132,7 @@ class FlowControllerThread(QThread):
             self.flow_controllers[flow_controller_index].set_flowrate(flowrate)
         target = self.flow_controllers[flow_controller_index].num
         command, com_id = self.commands.set_flowrate(target, self.flow_controllers[flow_controller_index].flowrate)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def set_mode(self, flow_controller_index, mode=None):
@@ -147,14 +147,14 @@ class FlowControllerThread(QThread):
             raise ValueError('Invalid mode. Mode must be "PID" or "Constant".')
 
         command, com_id = self.commands.set_mode(target, is_pid_mode)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def set_sensor(self, flow_controller_index, sensor):
         self.flow_controllers[flow_controller_index].set_parameters(sensor=sensor)
         target = self.flow_controllers[flow_controller_index].num
         command, com_id = self.commands.ssr_enable_disable(target, sensor)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
         # NOTE: Logic to turn continuous reading on/off is now handled in the main GUI class,
         # which has the global view of all sensors. This avoids race conditions and timing issues.
@@ -171,7 +171,7 @@ class FlowControllerThread(QThread):
                                                 self.flow_controllers[flow_controller_index].Kp,
                                                 self.flow_controllers[flow_controller_index].Ki,
                                                 self.flow_controllers[flow_controller_index].Kd)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def set_parameters_syringe(self, flow_controller_index, diameter=None, thread_pitch=None):
@@ -183,7 +183,7 @@ class FlowControllerThread(QThread):
         command, com_id = self.commands.pump_settings(target, 'SYRINGE',
                                                       self.flow_controllers[flow_controller_index].diameter,
                                                       self.flow_controllers[flow_controller_index].thread_pitch)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def set_parameters_peristaltic(self, flow_controller_index, tube_diameter=None, calibration=None):
@@ -196,37 +196,37 @@ class FlowControllerThread(QThread):
                                                       self.flow_controllers[flow_controller_index].tube_diameter,
                                                       self.flow_controllers[
                                                           flow_controller_index].peristaltic_calibration)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def start_stop(self, flow_controller_index, start=True):
         self.flow_controllers[flow_controller_index].set_active(start)
         target = self.flow_controllers[flow_controller_index].num
         command, com_id = self.commands.start_stop(target, start)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def reset_sensors(self):
         command, com_id = self.commands.ssr_reset()
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def set_continuous_reading(self, on=True):
         # This method is now called by the main GUI thread when appropriate
         command, com_id = self.commands.continuous_read(on)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def start_dispense(self, flow_controller_index, volume_to_dispense, flowrate):
         target = self.flow_controllers[flow_controller_index].num
         command, com_id = self.commands.start_dispense(target, volume_to_dispense, flowrate)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def stop_dispense(self, flow_controller_index):
         target = self.flow_controllers[flow_controller_index].num
         command, com_id = self.commands.stop_dispense(target)
-        print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
+        #print(f"FC Thread: Queuing command {com_id} -> {command.strip()}")
         self.mcu_signal.emit(command, com_id)
 
     def set_all(self, flow_controller_index):

@@ -1,6 +1,6 @@
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
-from mcu_cmd import MCUCommands
+from mcu import MCUCommands
 from collections import deque
 
 class DOCommands(MCUCommands):
@@ -45,17 +45,17 @@ class DOSensorThread(QThread):
 
     def do_start_stop(self, start=True):
         command, com_id = self.commands.start_stop(start=start)
-        print(f"DO Thread: Queuing command {com_id}")
+        #print(f"DO Thread: Queuing command {com_id}")
         self.mcu_signal.emit(command, com_id)
 
     def do_info(self):
         command, com_id = self.commands.info()
-        print(f"DO Thread: Queuing command {com_id}")
+        #print(f"DO Thread: Queuing command {com_id}")
         self.mcu_signal.emit(command, com_id)
 
     def do_help(self):
         command, com_id = self.commands.help()
-        print(f"DO Thread: Queuing command {com_id}")
+        #print(f"DO Thread: Queuing command {com_id}")
         self.mcu_signal.emit(command, com_id)
 
     def do_enable(self,target_id, enable=True):

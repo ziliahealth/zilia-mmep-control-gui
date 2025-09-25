@@ -4,14 +4,10 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QLineEdit, QPushB
 from PyQt5.QtGui import QPixmap
 from pyqtgraph import PlotWidget
 from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QMetaObject
-from collections import deque
 import configparser
 import os
 import functools
-
-# Assuming these are local modules for your project
-from mcu_cmd import MCUWorker  # Correctly import the MCUWorker
-from zo import ZOThread
+from mcu import MCUWorker
 from guiupdater import GUIUpdater
 from flow_controller import FlowControllerThread
 from temperature_controller import TemperatureControllerThread
@@ -26,9 +22,6 @@ class App(QMainWindow, QObject):
     The main application window for the Zilia MMEP Control GUI.
     It handles UI setup, signal/slot connections, and backend thread management.
     """
-
-    # --- Signals ---
-    # These signals now act as triggers for slots in the worker thread.
     mcu_connect_signal = pyqtSignal()
     mcu_disconnect_signal = pyqtSignal()
 
@@ -91,8 +84,6 @@ class App(QMainWindow, QObject):
         self.num_flow_controllers = 4
         self.num_temp_controllers = 2
         self.num_do_sensors = 2
-        self.flowrate_buffer_length = 10000
-        self.oxygen_buffer_length = 10000
 
     def _setup_window(self):
         """Sets the main window's title, size, and stylesheet."""
@@ -395,7 +386,6 @@ class App(QMainWindow, QObject):
         self.data_saver = DataSaver()
         self.data_saver.moveToThread(self.data_saver_thread)
 
-        self.zo_thread = ZOThread()
         self.flow_controllers = FlowControllerThread()
         self.temp_controllers = TemperatureControllerThread()
         self.do_sensors = DOSensorThread()
@@ -536,7 +526,6 @@ class App(QMainWindow, QObject):
         self.mcu_thread.start()
         self.sequence_thread.start()
         self.data_saver_thread.start()
-        self.zo_thread.start()
         self.gui_updater.start()
         self.flow_controllers.start()
         self.temp_controllers.start()
@@ -860,31 +849,63 @@ class App(QMainWindow, QObject):
             QApplication.processEvents()
 
     def save_config_button_onclick(self):
+        """Saves the current state of all UI controls to a configuration file."""
         file_path, _ = QFileDialog.getSaveFileName(self, 'Save Configuration File', '', 'INI Files (*.ini)')
-        if not file_path: return
+        if not file_path:
+            return
+
         config = configparser.ConfigParser()
+
+        # --- Save Flow Controller Settings ---
         for i in range(self.num_flow_controllers):
             section = f'Flow Controller {i + 1}'
             config.add_section(section)
-            fc = self.flow_controllers.flow_controllers[i]
-            pump_type = fc.pump_type
-            config.set(section, 'PumpType', pump_type)
-            config.set(section, 'FlowRate', self.flow_rate_inputs[i].text())
-            config.set(section, 'KP', self.proportional_inputs[i].text())
-            config.set(section, 'KI', self.integral_inputs[i].text())
-            config.set(section, 'KD', self.derivative_inputs[i].text())
-            config.set(section, 'Mode', self.flow_controller_dropdowns[i].currentText())
-            config.set(section, 'Sensor', self.sensor_dropdowns[i].currentText())
-            if pump_type == 'Syringe':
-                config.set(section, 'SyringeDiameter', self.diameter_inputs[i].text())
-                config.set(section, 'ThreadPitch', self.pitch_inputs[i].text())
-            elif pump_type == 'Peristaltic':
-                config.set(section, 'TubeDiameter', self.diameter_inputs[i].text())
-                config.set(section, 'CalibrationFactor', self.pitch_inputs[i].text())
-        with open(file_path, 'w') as config_file:
-            config.write(config_file)
-        self.log_widget.append(f"Configuration saved to {file_path}")
 
+            config.set(section, 'flowrate', self.flow_rate_inputs[i].text())
+            config.set(section, 'kp', self.proportional_inputs[i].text())
+            config.set(section, 'ki', self.integral_inputs[i].text())
+            config.set(section, 'kd', self.derivative_inputs[i].text())
+            config.set(section, 'mode', self.flow_controller_dropdowns[i].currentText().lower())
+
+            pump_type = self.pump_type_dropdowns[i].currentText().lower()
+            config.set(section, 'pump_type', pump_type)
+            if pump_type == 'syringe':
+                config.set(section, 'syringe_diameter', self.diameter_inputs[i].text())
+                config.set(section, 'thread_pitch', self.pitch_inputs[i].text())
+            elif pump_type == 'peristaltic':
+                config.set(section, 'tube_diameter', self.diameter_inputs[i].text())
+                config.set(section, 'calibration', self.pitch_inputs[i].text())
+
+            config.set(section, 'sensor', 'on' if self.sensor_dropdowns[i].currentText() == 'On' else 'off')
+            config.set(section, 'enable', 'on' if self.fc_control_enable[i].isChecked() else 'off')
+            config.set(section, 'dispense_volume', self.fc_control_volume_inputs[i].text())
+            config.set(section, 'dispense_flowrate', self.fc_control_rate_inputs[i].text())
+
+        # --- Save Temperature Controller Settings ---
+        for i in range(self.num_temp_controllers):
+            section = f'Temp Controller {i + 1}'
+            config.add_section(section)
+            config.set(section, 'target_temp', self.target_temp_inputs[i].text())
+            config.set(section, 'kp', self.temp_proportional_inputs[i].text())
+            config.set(section, 'ki', self.temp_integral_inputs[i].text())
+            config.set(section, 'kd', self.temp_derivative_inputs[i].text())
+            config.set(section, 'sensor', 'on' if self.temp_sensor_dropdowns[i].currentText() == 'On' else 'off')
+            config.set(section, 'enable', 'on' if self.temp_enable_checkboxes[i].isChecked() else 'off')
+
+        # --- Save DO Sensor Settings ---
+        section = 'DO Sensors'
+        config.add_section(section)
+        config.set(section, 'enable_1', 'on' if self.do_sensor_enables_checkboxes[0].isChecked() else 'off')
+        config.set(section, 'enable_2', 'on' if self.do_sensor_enables_checkboxes[1].isChecked() else 'off')
+        config.set(section, 'fluid', self.do_sensor_fluid_dropdown.currentText().lower())
+        config.set(section, 'units', self.do_sensor_units_dropdown.currentText())
+
+        try:
+            with open(file_path, 'w') as config_file:
+                config.write(config_file)
+            self.log_widget.append(f"Configuration successfully saved to {file_path}")
+        except IOError as e:
+            self.log_widget.append(f"Error saving configuration: {e}")
     def start_logging(self, filepath, initiated_by='Manual'):
         """Starts saving sensor data to a file."""
         if self.recording:
@@ -892,8 +913,8 @@ class App(QMainWindow, QObject):
 
         if not filepath:
             return
-
-        self.log_widget.append(f'{initiated_by} logging started to {filepath}')
+        if initiated_by == "manual":
+            self.log_widget.append(f'{initiated_by} logging started to {filepath}')
         self.start_logging_signal.emit(filepath)
         self.recording = True
         self.save_data_button.setText('Stop Recording')
