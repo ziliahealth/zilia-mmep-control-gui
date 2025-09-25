@@ -153,6 +153,11 @@ class TemperatureControllerThread(QThread):
         if new_data:
             self.update_plot_signal.emit()
 
+    def clear_buffers(self):
+        for controller in self.temperature_controllers:
+            controller.temp_buffer.clear()
+            controller.time_buffer.clear()
+
 class temperature_controller:
     def __init__(self, name, number):
         self.name = name

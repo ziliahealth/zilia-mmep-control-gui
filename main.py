@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QLineEdit, QPushB
     QWidget, QGridLayout, QTextEdit, QFileDialog, QComboBox, QGroupBox, QCheckBox, QDialog
 from PyQt5.QtGui import QPixmap
 from pyqtgraph import PlotWidget
-from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QMetaObject
 from collections import deque
 import configparser
 import os
@@ -58,6 +58,15 @@ class App(QMainWindow, QObject):
     # DO sensor signals
     do_enable_change_signal = pyqtSignal(int, bool)
     do_start_stop_signal = pyqtSignal(bool)
+
+    clear_plots_signal = pyqtSignal()
+
+    # Sequence runner signal
+    load_and_start_sequence_signal = pyqtSignal(str)
+
+    # Data saver signals
+    start_logging_signal = pyqtSignal(str)
+    stop_logging_signal = pyqtSignal()
 
     def __init__(self):
         """
@@ -152,7 +161,9 @@ class App(QMainWindow, QObject):
         self.load_config_button = QPushButton('Load configuration')
         self.save_config_button = QPushButton('Save configuration')
         self.save_data_button = QPushButton('Log data')
+        self.load_data_button = QPushButton('Load data')
         self.load_sequence_button = QPushButton("Load Sequence")
+        self.reset_plot_button = QPushButton("Reset Plots")
 
         self.flowrate_plot_widget = PlotWidget()
         self.do_plot_widget = PlotWidget()
@@ -299,12 +310,16 @@ class App(QMainWindow, QObject):
         self.load_config_button.setStyleSheet(button_stylesheet)
         self.save_config_button.setStyleSheet(button_stylesheet)
         self.save_data_button.setStyleSheet(button_stylesheet)
+        self.load_data_button.setStyleSheet(button_stylesheet)
+        self.reset_plot_button.setStyleSheet(button_stylesheet)
 
         layout.addWidget(self.connect_button)
         layout.addWidget(self.load_sequence_button)
         layout.addWidget(self.load_config_button)
         layout.addWidget(self.save_config_button)
         layout.addWidget(self.save_data_button)
+        layout.addWidget(self.load_data_button)
+        layout.addWidget(self.reset_plot_button)
 
         logo_label = QLabel()
         if os.path.exists('logo.png'):
@@ -317,6 +332,33 @@ class App(QMainWindow, QObject):
 
         layout.addStretch()
         return layout
+
+    def _set_controls_enabled(self, enabled):
+        """Enable or disable all flow and temperature controller UI elements."""
+        # Flow controller widgets
+        for i in range(self.num_flow_controllers):
+            self.pump_type_dropdowns[i].setEnabled(enabled)
+            self.flow_rate_inputs[i].setEnabled(enabled)
+            self.proportional_inputs[i].setEnabled(enabled)
+            self.integral_inputs[i].setEnabled(enabled)
+            self.derivative_inputs[i].setEnabled(enabled)
+            self.diameter_inputs[i].setEnabled(enabled)
+            self.pitch_inputs[i].setEnabled(enabled)
+            self.flow_controller_dropdowns[i].setEnabled(enabled)
+            self.sensor_dropdowns[i].setEnabled(enabled)
+            self.fc_control_enable[i].setEnabled(enabled)
+            self.fc_control_volume_inputs[i].setEnabled(enabled)
+            self.fc_control_rate_inputs[i].setEnabled(enabled)
+            self.fc_control_dispense_buttons[i].setEnabled(enabled)
+
+        # Temperature controller widgets
+        for i in range(self.num_temp_controllers):
+            self.temp_enable_checkboxes[i].setEnabled(enabled)
+            self.target_temp_inputs[i].setEnabled(enabled)
+            self.temp_proportional_inputs[i].setEnabled(enabled)
+            self.temp_integral_inputs[i].setEnabled(enabled)
+            self.temp_derivative_inputs[i].setEnabled(enabled)
+            self.temp_sensor_dropdowns[i].setEnabled(enabled)
 
     def _setup_plots(self):
         """Configures the aesthetics and data structures for the plots."""
@@ -341,8 +383,19 @@ class App(QMainWindow, QObject):
         self.mcu_worker.moveToThread(self.mcu_thread)
         # ---
 
-        self.zo_thread = ZOThread()
+        # --- Sequence Runner Setup ---
+        self.sequence_thread = QThread()
+        self.sequence_thread.setObjectName("Sequence_Thread")
         self.sequence_runner = SequenceRunner()
+        self.sequence_runner.moveToThread(self.sequence_thread)
+
+        # --- Data Saver Setup ---
+        self.data_saver_thread = QThread()
+        self.data_saver_thread.setObjectName("DataSaver_Thread")
+        self.data_saver = DataSaver()
+        self.data_saver.moveToThread(self.data_saver_thread)
+
+        self.zo_thread = ZOThread()
         self.flow_controllers = FlowControllerThread()
         self.temp_controllers = TemperatureControllerThread()
         self.do_sensors = DOSensorThread()
@@ -354,7 +407,6 @@ class App(QMainWindow, QObject):
                                       self.flow_controllers.flow_controllers,
                                       self.temp_controllers.temperature_controllers,
                                       self.do_sensors.do_sensors)
-        self.data_saver = DataSaver()
 
     def _connect_signals(self):
         """Connects all signals to their corresponding slots."""
@@ -363,8 +415,10 @@ class App(QMainWindow, QObject):
         self.load_config_button.clicked.connect(self.load_config_button_onclick)
         self.save_config_button.clicked.connect(self.save_config_button_onclick)
         self.save_data_button.clicked.connect(self.save_data_button_onclick)
+        self.load_data_button.clicked.connect(self.load_data_button_onclick)
         self.load_sequence_button.clicked.connect(self.sequence_onclick)
         self.do_sensor_calibrate_button.clicked.connect(self.open_calibration_window)
+        self.reset_plot_button.clicked.connect(self.reset_plot_button_onclick)
 
         # Flow Controller Inputs
         for i in range(self.num_flow_controllers):
@@ -406,7 +460,6 @@ class App(QMainWindow, QObject):
         # Internal Application Signals
         self.mcu_connect_signal.connect(self.mcu_worker.connect_mcu)
         self.mcu_disconnect_signal.connect(self.mcu_worker.disconnect_mcu)
-        self.data_saver_stop_signal.connect(self.data_saver.stop_save)
 
         # Thread Communication Signals (from worker to GUI)
         self.mcu_worker.log_signal.connect(self.gui_updater.update_log)
@@ -415,6 +468,14 @@ class App(QMainWindow, QObject):
         self.mcu_worker.parser.do_data_signal.connect(self.do_sensors.process_do_serial_data)
         self.mcu_worker.parser.temp_data_signal.connect(self.temp_controllers.process_temp_serial_data)
         self.mcu_worker.parser.flow_data_signal.connect(self.flow_controllers.process_flow_serial_data)
+
+        # --- Data Saver Connections ---
+        self.start_logging_signal.connect(self.data_saver.start_saving_to_file)
+        self.stop_logging_signal.connect(self.data_saver.stop_save)
+        # Connect MCU data directly to the saver
+        self.mcu_worker.parser.flow_data_signal.connect(self.data_saver.save_flow_data)
+        self.mcu_worker.parser.temp_data_signal.connect(self.data_saver.save_temp_data)
+        self.mcu_worker.parser.do_data_signal.connect(self.data_saver.save_do_data)
 
         # Flow Controller Signals (from GUI to worker)
         self.fc_pump_settings_peristaltic_signal.connect(self.flow_controllers.set_parameters_peristaltic)
@@ -443,23 +504,50 @@ class App(QMainWindow, QObject):
         self.do_start_stop_signal.connect(self.do_sensors.do_start_stop)
         self.do_sensors.mcu_signal.connect(self.mcu_worker.submit_command)
         self.do_sensors.update_plot_signal.connect(self.gui_updater.update_do_plot)
+
+        # Sequence Runner Signals
+        self.load_and_start_sequence_signal.connect(self.sequence_runner.load_and_start_sequence)
+        self.sequence_runner.log_signal.connect(self.gui_updater.update_log)
+        self.sequence_runner.sequence_started_signal.connect(self.on_sequence_started)
+        self.sequence_runner.sequence_finished_signal.connect(self.on_sequence_finished)
+        # Connect sequence signals to controller threads to command hardware
+        self.sequence_runner.set_flow_rate_signal.connect(self.flow_controllers.set_flowrate)
+        self.sequence_runner.enable_pump_signal.connect(self.flow_controllers.start_stop)
+        self.sequence_runner.set_temperature_signal.connect(self.temp_controllers.set_temperature)
+        self.sequence_runner.enable_heater_signal.connect(self.temp_controllers.set_enable)
+        self.sequence_runner.dispense_volume_signal.connect(self.flow_controllers.start_dispense)
+        self.sequence_runner.start_logging_signal.connect(self.on_sequence_start_logging)
+        self.sequence_runner.stop_logging_signal.connect(self.on_sequence_stop_logging)
+        # Connect sequence signals to UI update slots
+        self.sequence_runner.set_flow_rate_signal.connect(self.update_flow_rate_input)
+        self.sequence_runner.enable_pump_signal.connect(self.update_pump_enable_checkbox)
+        self.sequence_runner.set_temperature_signal.connect(self.update_temperature_input)
+        self.sequence_runner.enable_heater_signal.connect(self.update_heater_enable_checkbox)
+
         # ---
+        self.clear_plots_signal.connect(self.flow_controllers.clear_buffers)
+        self.clear_plots_signal.connect(self.temp_controllers.clear_buffers)
+        self.clear_plots_signal.connect(self.do_sensors.clear_buffers)
 
     def _start_services(self):
         """Loads the default configuration and starts all background threads."""
+
+
+        self.mcu_thread.start()
+        self.sequence_thread.start()
+        self.data_saver_thread.start()
+        self.zo_thread.start()
+        self.gui_updater.start()
+        self.flow_controllers.start()
+        self.temp_controllers.start()
+        self.do_sensors.start()
+
+        #try to connect to mcu on startup
+        self.mcu_connect_signal.emit()
         self.load_config('default.ini')
         for i in range(self.num_flow_controllers):
             self.flow_controllers.set_flowrate(i, float(self.flow_rate_inputs[i].text()))
             self.flow_controllers.set_mode(i, self.flow_controller_dropdowns[i].currentText())
-
-        self.mcu_thread.start()
-        self.zo_thread.start()
-        self.gui_updater.start()
-        self.data_saver.start()
-        self.flow_controllers.start()
-        self.temp_controllers.start()
-        self.do_sensors.start()
-        self.sequence_runner.start()
 
     def open_calibration_window(self):
         """Opens the DO sensor calibration window."""
@@ -685,21 +773,91 @@ class App(QMainWindow, QObject):
                 self.pitch_inputs[i].setText(
                     config.get(section, 'CalibrationFactor', fallback=str(fc.peristaltic_calibration)))
 
+            self.fc_control_enable[i].setChecked(config.get(section, 'enable', fallback='off').lower() == 'on')
+            self.fc_control_volume_inputs[i].setText(config.get(section, 'dispense_volume', fallback='0'))
+            self.fc_control_rate_inputs[i].setText(config.get(section, 'dispense_flowrate', fallback='0'))
+
+        for i in range(self.num_temp_controllers):
+            section = f'Temp Controller {i + 1}'
+            if not config.has_section(section): continue
+            self.temp_enable_checkboxes[i].setChecked(
+                config.get(section, 'enable', fallback='Off').capitalize() == 'On')
+            self.target_temp_inputs[i].setText(config.get(section, 'target_temp', fallback='0'))
+            self.temp_proportional_inputs[i].setText(config.get(section, 'kp', fallback='0'))
+            self.temp_integral_inputs[i].setText(config.get(section, 'ki', fallback='0'))
+            self.temp_derivative_inputs[i].setText(config.get(section, 'kd', fallback='0'))
+            self.temp_sensor_dropdowns[i].setCurrentText(config.get(section, 'sensor', fallback='Off').capitalize())
+
+        self.do_sensor_enables_checkboxes[0].setChecked(
+            config.get('DO Sensors', 'enable_1', fallback='off').lower() == 'on')
+        self.do_sensor_enables_checkboxes[1].setChecked(
+            config.get('DO Sensors', 'enable_2', fallback='off').lower() == 'on')
+        self.do_sensor_fluid_dropdown.setCurrentText(config.get('DO Sensors', 'fluid', fallback='Water').capitalize())
+        self.do_sensor_units_dropdown.setCurrentText(config.get('DO Sensors', 'units', fallback='Raw [V]'))
+
     def load_config_button_onclick(self):
         file_path, _ = QFileDialog.getOpenFileName(self, 'Load Configuration File', '', 'INI Files (*.ini)')
         if file_path:
             self.load_config(file_path)
 
+    def on_sequence_started(self):
+        """Slot for when the sequence starts. Updates the GUI."""
+        self.load_sequence_button.setText("Stop Sequence")
+        self._set_controls_enabled(False)
+
+    def on_sequence_finished(self):
+        """Slot for when the sequence finishes or is stopped. Updates the GUI."""
+        self.load_sequence_button.setText("Load Sequence")
+        self._set_controls_enabled(True)
+        # Also stop any logging that was initiated by the sequence, if it's still running
+        if self.recording:
+            self.stop_logging(initiated_by='Sequence End')
+
     def sequence_onclick(self):
-        if self.load_sequence_button.text() == "Stop":
-            self.load_sequence_button.setText("Load Sequence")
+        """Handles the click of the 'Load/Stop Sequence' button."""
+        if self.sequence_runner.is_running():
+            # Invoke the stop method on the sequence runner's thread
+            QMetaObject.invokeMethod(self.sequence_runner, "stop_sequence", Qt.QueuedConnection)
         elif self.connected:
-            sequence_file, _ = QFileDialog.getOpenFileName(self, 'Load Sequence File', '', 'JSON Files (*.json)')
+            sequence_file, _ = QFileDialog.getOpenFileName(self, 'Load Sequence File', '', 'TOML Files (*.toml)')
             if sequence_file:
-                self.sequence_runner.load_sequence(sequence_file)
-                self.load_sequence_button.setText("Stop")
+                # Emit a signal to have the sequence runner load and start the file on its own thread
+                self.load_and_start_sequence_signal.emit(sequence_file)
         else:
             self.gui_updater.update_log('Please connect to the MCU before starting a sequence')
+
+    def update_flow_rate_input(self, controller_index, rate):
+        """Updates the flow rate input field from a sequence event."""
+        if 0 <= controller_index < self.num_flow_controllers:
+            self.flow_rate_inputs[controller_index].setText(str(rate))
+
+    def update_pump_enable_checkbox(self, controller_index, enabled):
+        """Updates the pump enable checkbox from a sequence event."""
+        if 0 <= controller_index < self.num_flow_controllers:
+            checkbox = self.fc_control_enable[controller_index]
+            # Block signals to prevent the checkbox's stateChanged signal from firing,
+            # which would cause a redundant command to be sent.
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(enabled))
+            checkbox.blockSignals(False)
+            # Force the application to process events to ensure the UI repaints immediately.
+            QApplication.processEvents()
+
+    def update_temperature_input(self, controller_index, temp):
+        """Updates the temperature input field from a sequence event."""
+        if 0 <= controller_index < self.num_temp_controllers:
+            self.target_temp_inputs[controller_index].setText(str(temp))
+
+    def update_heater_enable_checkbox(self, controller_index, enabled):
+        """Updates the heater enable checkbox from a sequence event."""
+        if 0 <= controller_index < self.num_temp_controllers:
+            checkbox = self.temp_enable_checkboxes[controller_index]
+            # Block signals to prevent the checkbox's stateChanged signal from firing.
+            checkbox.blockSignals(True)
+            checkbox.setChecked(bool(enabled))
+            checkbox.blockSignals(False)
+            # Force the application to process events to ensure the UI repaints immediately.
+            QApplication.processEvents()
 
     def save_config_button_onclick(self):
         file_path, _ = QFileDialog.getSaveFileName(self, 'Save Configuration File', '', 'INI Files (*.ini)')
@@ -727,31 +885,74 @@ class App(QMainWindow, QObject):
             config.write(config_file)
         self.log_widget.append(f"Configuration saved to {file_path}")
 
+    def start_logging(self, filepath, initiated_by='Manual'):
+        """Starts saving sensor data to a file."""
+        if self.recording:
+            self.stop_logging()  # Stop previous log first
+
+        if not filepath:
+            return
+
+        self.log_widget.append(f'{initiated_by} logging started to {filepath}')
+        self.start_logging_signal.emit(filepath)
+        self.recording = True
+        self.save_data_button.setText('Stop Recording')
+
+    def stop_logging(self, initiated_by='Manual'):
+        """Stops saving sensor data."""
+        if not self.recording:
+            return
+
+        self.log_widget.append(f"{initiated_by} logging stopped.")
+        self.stop_logging_signal.emit()
+        self.recording = False
+        self.save_data_button.setText('Log Data')
+
     def save_data_button_onclick(self):
+        """Handles the click of the 'Log Data' button."""
         if not self.recording:
             filepath, _ = QFileDialog.getSaveFileName(self, 'Save Data', '', 'CSV Files (*.csv)')
             if filepath:
-                self.log_widget.append(f'Saving data to {filepath}')
-                self.data_saver.set_filename(filepath)
-                self.data_saver.start_save()
-                self.recording = True
-                self.save_data_button.setText('Stop Recording')
-                self.mcu_worker.sensor_signal.connect(self.data_saver.save_data)  # connect to worker's signal
+                self.start_logging(filepath, initiated_by='Manual')
         else:
-            self.recording = False
-            self.save_data_button.setText('Log Data')
-            self.data_saver_stop_signal.emit()
-            if self.mcu_worker.sensor_signal:  # Check if signal exists before disconnecting
-                self.mcu_worker.sensor_signal.disconnect(self.data_saver.save_data)
+            self.stop_logging(initiated_by='Manual')
+
+
+    def load_data_button_onclick(self):
+        pass
+
+    # --- Slots for Sequence Runner Commands ---
+    def on_sequence_start_logging(self, filepath):
+        """Slot to start logging from a sequence event."""
+        self.start_logging(filepath, initiated_by='Sequence')
+
+    def on_sequence_stop_logging(self):
+        """Slot to stop logging from a sequence event."""
+        self.stop_logging(initiated_by='Sequence')
+
+    def reset_plot_button_onclick(self):
+        print("Resetting plots and clearing data buffers...")
+        self.do_plot_widget.clear()
+        self.temp_plot_widget.clear()
+        self.flowrate_plot_widget.clear()
+        self.clear_plots_signal.emit()
 
     def closeEvent(self, event):
         """Ensure threads are stopped cleanly on application close."""
         print("Closing application...")
+        # Stop sequence runner on its own thread, wait for it to finish
+        QMetaObject.invokeMethod(self.sequence_runner, "stop_sequence", Qt.BlockingQueuedConnection)
         self.mcu_disconnect_signal.emit()  # Ensure MCU is disconnected
+
         self.mcu_thread.quit()
-        if not self.mcu_thread.wait(3000):  # Wait up to 3 seconds
-            print("MCU thread did not terminate, forcing it.")
-            self.mcu_thread.terminate()
+        self.mcu_thread.wait()
+
+        self.sequence_thread.quit()
+        self.sequence_thread.wait()
+
+        self.data_saver_thread.quit()
+        self.data_saver_thread.wait()
+
         # You should add similar shutdown logic for your other threads.
         event.accept()
 

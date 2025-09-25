@@ -1,0 +1,61 @@
+# Example sequence file in TOML format.
+# Each step is defined as an element in the 'event' array of tables.
+[[event]]
+type = "start_logging"
+filepath = "C:/Users/marca/PycharmProjects/MMEP-Control-GUI/test_sequence_save.csv"
+
+[[event]]
+type = "set_flow_rate"
+controller = 0
+rate = 50.0
+
+[[event]]
+type = "enable_pump"
+controller = 0
+enabled = true
+
+[[event]]
+type = "delay"
+duration_s = 10
+
+[[event]]
+type = "set_temperature"
+controller = 0
+temp = 37.0
+
+[[event]]
+type = "enable_heater"
+controller = 0
+enabled = true
+
+[[event]]
+type = "delay"
+duration_s = 20
+
+[[event]]
+type = "set_flow_rate"
+controller = 0
+rate = 0.0
+
+[[event]]
+type = "enable_pump"
+controller = 0
+enabled = false
+
+[[event]]
+type = "enable_heater"
+controller = 0
+enabled = false
+
+[[event]]
+type = "dispense_volume"
+controller = 1
+volume = 50.0
+flowrate = 25.0
+
+[[event]]
+type = "delay"
+duration_s = 10
+
+[[event]]
+type = "stop_logging"

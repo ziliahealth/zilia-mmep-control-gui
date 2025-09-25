@@ -72,6 +72,13 @@ class DOSensorThread(QThread):
         if any(sensor.enabled for sensor in self.do_sensors):
             self.update_plot_signal.emit()
 
+    def clear_buffers(self):
+        for sensor in self.do_sensors:
+            sensor.raw_data_buffer.clear()
+            sensor.partial_pressure_buffer.clear()
+            sensor.saturation_buffer.clear()
+            sensor.time_buffer.clear()
+
 
 class do_sensor:
     def __init__(self,number,name,buffer_size):
