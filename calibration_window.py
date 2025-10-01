@@ -1,9 +1,10 @@
 # Import necessary libraries
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QGroupBox, QComboBox, \
     QLineEdit, QSlider, QLabel
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 import pyqtgraph as pg
 import numpy as np
+from blood_oxygen_dissociation_models import HemoglobinDissociationDash2010
 
 
 class CalibrationWindow(QDialog):
@@ -15,8 +16,8 @@ class CalibrationWindow(QDialog):
     calibration points. It also includes a panel for modeling blood oxygen
     dissociation curves.
     """
-
-    def __init__(self, parent=None):
+    load_data_signal = pyqtSignal()
+    def __init__(self, parent=None ):
         super().__init__(parent)
 
         self.setWindowTitle("DO Sensor Calibration")
@@ -39,7 +40,7 @@ class CalibrationWindow(QDialog):
 
         # --- Blood Oxygen Dissociation Model ---
         self.dissociation_model_dropdown = QComboBox()
-        self.dissociation_model_dropdown.addItems(['Severinghaus 1979', 'Dash 2006'])
+        self.dissociation_model_dropdown.addItems(['Dash 2010'])
         self.pco2_input = QLineEdit("40")
         self.ph_input = QLineEdit("7.4")
         self.temp_slider = QSlider(Qt.Horizontal)
@@ -243,11 +244,10 @@ class CalibrationWindow(QDialog):
                 n = 2.7
                 so2 = 100 / (1 + (p50 / po2) ** n)
 
-            elif model == 'Dash 2006':
+            elif model == 'Dash 2010':
                 # Simplified Dash-Bassingthwaighte model
-                p50 = 26.8
-                n = 2.6
-                so2 = 100 * (po2 ** n) / (p50 ** n + po2 ** n)
+                model = HemoglobinDissociationDash2010(temperature=temp, pH=ph, pCO2=pco2)
+                so2 = model.calculate_sO2(po2) * 100  # Convert to percentage
 
             if so2 is not None:
                 self.dissociation_plot_widget.clear()
@@ -260,3 +260,8 @@ class CalibrationWindow(QDialog):
         except (ValueError, ZeroDivisionError):
             # Handle cases with invalid input
             self.dissociation_plot_widget.clear()
+
+    def load_data_button_onclick(self, data):
+        # Method to load data into the plots when the Load Data button is clicked
+        pass
+
