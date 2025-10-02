@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPus
 from PyQt5.QtCore import Qt, pyqtSignal
 import pyqtgraph as pg
 import numpy as np
-from blood_oxygen_dissociation_models import HemoglobinDissociationDash2010
+from do_sensor_calibration.blood_oxygen_dissociation_models import HemoglobinDissociationDash2010
 
 
 class CalibrationWindow(QDialog):
@@ -20,7 +20,7 @@ class CalibrationWindow(QDialog):
     def __init__(self, parent=None ):
         super().__init__(parent)
 
-        self.setWindowTitle("DO Sensor Calibration")
+        self.setWindowTitle("do_sensor_calibration")
         self.setGeometry(150, 150, 1800, 800)
         self.setStyleSheet("background-color: black; color: rgb(139,203,149)")
 
@@ -246,8 +246,8 @@ class CalibrationWindow(QDialog):
 
             elif model == 'Dash 2010':
                 # Simplified Dash-Bassingthwaighte model
-                model = HemoglobinDissociationDash2010(temperature=temp, pH=ph, pCO2=pco2)
-                so2 = model.calculate_sO2(po2) * 100  # Convert to percentage
+                model = HemoglobinDissociationDash2010(pH=ph, pCO2=pco2)
+                so2 = model.calculate_sO2(po2,temperature=temp) * 100  # Convert to percentage
 
             if so2 is not None:
                 self.dissociation_plot_widget.clear()

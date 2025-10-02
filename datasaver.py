@@ -1,3 +1,4 @@
+import numpy as np
 from PyQt5.QtCore import QObject, pyqtSlot
 import datetime
 import csv
@@ -130,6 +131,8 @@ class DataSaver(QObject):
                         except (ValueError, IndexError):
                             # Skip lines that can't be converted or don't match column count
                             continue
+            # convert data to a numpy array
+            data = np.array(data)
         except FileNotFoundError:
             print(f"Error: File not found at {file_path}")
         except Exception as e:
@@ -157,3 +160,10 @@ class DataSaver(QObject):
         """
         return self._read_data_section(file_path, "# --- DO SENSOR DATA ---", 3)
 
+
+# Example usage:
+if __name__ == "__main__":
+    saver = DataSaver()
+    path = "test-1.csv"
+    do_data = saver.read_do_data(path)
+    print("DO Sensor Data:", do_data)

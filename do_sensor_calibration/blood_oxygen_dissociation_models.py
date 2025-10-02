@@ -52,6 +52,18 @@ class HemoglobinDissociationDash2010:
         self.Hp0 = 10 ** (-self.pH0)
         self.C500 = self.alphaO20 * self.P500
 
+    def set_parameters(self,pH: float = None, pCO2: float = None, DPG: float = None, Hct: float = None):
+        "Updates initial input parameters with new values"
+
+        if pH is not None:
+            self.pH = pH
+        if pCO2 is not None:
+            self.pCO2 = pCO2
+        if DPG is not None:
+            self.DPG = DPG
+        if Hct is not None:
+            self.Hct = Hct
+
     def calculate_sO2(self, pO2_values, temperature: float) -> np.ndarray:
         """
         Calculates sO2 for an array of pO2 values at a specific temperature.
@@ -190,9 +202,9 @@ class HemoglobinDissociationDash2010:
 if __name__ == "__main__":
     # Example usage and test
     model = HemoglobinDissociationDash2010(pH=7.56, pCO2=40.0, DPG=4.65e-3, Hct=0.45)
-    test_file = r'DO Sensor Calibration/dash2010_jsim_37TEMP_7.56PH_40PCO2_0.45HCT_0.00465DPG.csv'
+    test_file = r'dash2010_jsim_37TEMP_7.56PH_40PCO2_0.45HCT_0.00465DPG.csv'
     model.test(jsim_data_path=test_file, temperature=37, plot=True)
     model = HemoglobinDissociationDash2010(pH=7.35, pCO2=35, DPG=4.65e-3, Hct=0.45)
-    test_file = r'DO Sensor Calibration/dash2010_jsim_35TEMP_7.35PH_35PCO2_0.45HCT_0.00465DPG.csv'
+    test_file = r'dash2010_jsim_35TEMP_7.35PH_35PCO2_0.45HCT_0.00465DPG.csv'
     model.test(jsim_data_path=test_file, temperature=35, plot=True)
     print(model.calculate_sO2(50, temperature=37))
