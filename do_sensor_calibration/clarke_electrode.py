@@ -133,8 +133,12 @@ class ClarkeElectrode:
         V_high = np.polyval(self.cal_points['high'].model, temperature)
         V_low = np.polyval(self.cal_points['low'].model, temperature)
 
-        return henrys_po2_high * (measured_voltage - V_low) / (V_high - V_low)
+        po2 = henrys_po2_high * (measured_voltage - V_low) / (V_high - V_low)
 
+        #negative values could emerge in low oxygen conditions due to noise
+        if po2 < 0:
+            po2 = 0.0
+        return po2
 
 # --- Separate Visualization and Data Utilities ---
 
