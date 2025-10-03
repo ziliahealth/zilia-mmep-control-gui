@@ -160,6 +160,30 @@ class DataSaver(QObject):
         """
         return self._read_data_section(file_path, "# --- DO SENSOR DATA ---", 3)
 
+    def _parse_temp_data(self, temp_data):
+        """Parses raw temp data into a dictionary mapping index to (times, values)."""
+        temps_by_idx = {}
+        for row in temp_data:
+            # Format: timestamp, idx_i, temp_i, duty_i, idx_j, temp_j, duty_j
+            timestamp = row[0]
+            for i in range(1, len(row), 3):
+                idx, temp = row[i], row[i+1]
+                if idx not in temps_by_idx:
+                    temps_by_idx[idx] = ([], [])
+                temps_by_idx[idx][0].append(timestamp)
+                temps_by_idx[idx][1].append(temp)
+        return temps_by_idx
+
+    def _parse_do_data(self, sensor_index):
+        """Parses raw DO data for a specific sensor index (1 or 2)."""
+        times, values = [], []
+        for row in self.raw_do_data:
+            # Format: timestamp, do1, do2
+            times.append(row[0])
+            values.append(row[sensor_index])
+        return times, values
+
+
 
 # Example usage:
 if __name__ == "__main__":

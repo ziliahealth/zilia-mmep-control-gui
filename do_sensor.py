@@ -2,7 +2,9 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from mcu import MCUCommands
 from collections import deque
-from do_sensor_calibration.clarke_electrode import ClarkeElectrode,CalibrationPoint,
+import os
+from do_sensor_calibration.clarke_electrode import ClarkeElectrode, DataProcessor, load_vapor_pressure_func
+from do_sensor_calibration.blood_oxygen_dissociation_models import HemoglobinDissociationDash2010
 
 class DOCommands(MCUCommands):
     #DO Sensor Commands
@@ -68,7 +70,7 @@ class DOSensorThread(QThread):
         # convert time from ms to seconds
         for i, sensor in enumerate(self.do_sensors):
             if sensor.enabled:
-                sensor.add_data((data[0]), (data[i+1]))
+                sensor.add_raw_data((data[0]), (data[i+1]))
         # Emit a signal
         if any(sensor.enabled for sensor in self.do_sensors):
             self.update_plot_signal.emit()
@@ -80,36 +82,53 @@ class DOSensorThread(QThread):
             sensor.saturation_buffer.clear()
             sensor.time_buffer.clear()
 
+    def update_last_temperature(self, data: list):
+        for i in len(data):
+            index = data[i]
+            temperature = data [i+1]
+            for sensor in self.do_sensors:
+                if sensor.number == index:
+                    sensor.update_temperature(temperature)
+
+    def update_dissociation_parameters(self, pH: float, pCO2:float):
+        for sensor in self.do_sensors:
+            sensor.update_hemoglobin_parameters(pH=pH, pCO2=pCO2, DPG=None, Hct=None)
+        print(sensor.hemoglobin_model.pH, sensor.hemoglobin_model.pCO2)
 
 class do_sensor:
     def __init__(self,number,name,buffer_size):
         self.number = number
         self.name = name
         self.enabled = False
-        self.calibrated = False
         self.buffer_size = buffer_size
         self.raw_data_buffer = deque(maxlen=buffer_size)
         self.partial_pressure_buffer = deque(maxlen=buffer_size)
         self.saturation_buffer = deque(maxlen=buffer_size)
         self.time_buffer = deque(maxlen=buffer_size)
         self.temperature_celsius = 25.0  # Default temperature for saturation calculation
+        self.hemoglobin_model = HemoglobinDissociationDash2010()
+        self.processor = DataProcessor()
+        print(os.getcwd())
+        vapor_pressure_func = load_vapor_pressure_func(r"do_sensor_calibration/water_vapor_pressure.csv")
+        self.clarke_electrode = ClarkeElectrode(vapor_pressure_func=vapor_pressure_func)
+        self.temperature_celsius = None  # Current temperature for calibration
 
     def set_enable(self,enable):
         self.enabled = enable
 
-    def set_calibrated(self, calibrated):
-        self.calibrated = calibrated
 
     def add_data(self, time_ms: int, raw_voltage: float):
         # Simply append; deque handles discarding the oldest element
         self.raw_data_buffer.append(raw_voltage)
         self.time_buffer.append(self.ms_to_elapsed_seconds(time_ms))
-        if self.calibrated:
-            partial_pressure = self.compute_partial_pressure(raw_voltage)
-            saturation = self.compute_saturation(partial_pressure, self.temperature_celsius)
-            self.partial_pressure_buffer.append(partial_pressure)
-            self.saturation_buffer.append(saturation)
+        self.add_calibrated_data(raw_voltage)
 
+    def add_calibrated_data(self, raw_voltage: float):
+        if self.clarke_electrode.is_calibrated and self.temperature_celsius is not None:
+            po2 = self.clarke_electrode.get_po2(temperature=self.temperature_celsius, measured_voltage=raw_voltage)
+            self.partial_pressure_buffer.append(po2)
+            so2 = self.hemoglobin_model.calculate_sO2(po2, temperature=self.temperature_celsius)
+            self.saturation_buffer.append(so2)
     def deque_to_numpy(self):
         """Helper to get a NumPy array view of the data."""
         return np.array(self.raw_data_buffer)
@@ -120,10 +139,8 @@ class do_sensor:
     def compute_partial_pressure(self, raw_voltage):
         #placeholder conversion to partial pressure
         return raw_voltage * 10.0
+    def update_hemoglobin_parameters(self,pH: float = None, pCO2: float = None, DPG: float = None, Hct: float = None):
+        self.hemoglobin_model.set_parameters(pH=pH, pCO2=pCO2, DPG=DPG, Hct=Hct)
 
-    def compute_saturation(self, partial_pressure, temperature_celsius):
-        # Placeholder formula for saturation calculation
-        saturation = (partial_pressure / 21.0) * 100.0
-        # Simple temperature correction (not accurate, just for illustration)
-        saturation *= (1 + 0.03 * (temperature_celsius - 25))
-        return saturation
+    def update_temperature(self, temperature_celsius: float):
+        self.temperature_celsius = temperature_celsius

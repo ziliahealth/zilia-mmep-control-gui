@@ -1,9 +1,11 @@
 # Import necessary libraries
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QGroupBox, QComboBox, \
-    QLineEdit, QSlider, QLabel
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QPushButton, QGroupBox, QComboBox, QFileDialog,
+    QLineEdit, QSlider, QLabel)
 from PyQt5.QtCore import Qt, pyqtSignal
 import pyqtgraph as pg
 import numpy as np
+import os
 from do_sensor_calibration.blood_oxygen_dissociation_models import HemoglobinDissociationDash2010
 
 
@@ -17,9 +19,10 @@ class CalibrationWindow(QDialog):
     dissociation curves.
     """
     load_data_signal = pyqtSignal()
-    def __init__(self, parent=None ):
+    update_dissociation_signal = pyqtSignal(float, float)
+    def __init__(self, main_app, parent=None ):
         super().__init__(parent)
-
+        self.main_app = main_app
         self.setWindowTitle("do_sensor_calibration")
         self.setGeometry(150, 150, 1800, 800)
         self.setStyleSheet("background-color: black; color: rgb(139,203,149)")
@@ -123,8 +126,14 @@ class CalibrationWindow(QDialog):
         self.rois = {}
         self._store_plot_items()
 
+        # Connect signals
+        self.connect_signals()
         # Initial Plot
         self.update_dissociation_curve()
+
+    def connect_signals(self):
+        self.load_button.clicked.connect(self.load_data_button_onclick)
+        self.update_dissociation_signal.connect(self.main_app.do_sensors.update_dissociation_parameters)
 
     def _create_sensor_panel(self, title):
         """Creates a group box containing a 2x2 grid of plots for a single sensor."""
@@ -166,10 +175,12 @@ class CalibrationWindow(QDialog):
         group_box.setLayout(layout)
         return group_box
 
+        # In calibration_window.py
+
     def _store_plot_items(self):
         """
-        Helper method to populate dictionaries with references to the plots and ROIs
-        for easier programmatic access. It also connects ROI signals.
+        Helper method to populate dictionaries with references to the plots, ROIs,
+        and data curves for easier programmatic access.
         """
         for i, group in enumerate([self.sensor1_group, self.sensor2_group]):
             sensor_id = f"sensor{i + 1}"
@@ -182,22 +193,28 @@ class CalibrationWindow(QDialog):
             self.plots[sensor_id]['cal_0'] = layout.itemAtPosition(1, 0).widget()
             self.plots[sensor_id]['cal_1'] = layout.itemAtPosition(1, 1).widget()
 
+            # --- MODIFICATION START ---
+            # Create the curve items once and store references to them.
+            # This allows us to update their data later without clearing the plot.
+            self.plots[sensor_id]['do_curve'] = self.plots[sensor_id]['do_reading'].plot(pen='g')
+            self.plots[sensor_id]['temp_curve'] = self.plots[sensor_id]['temperature'].plot(pen='y')
+            # --- MODIFICATION END ---
+
             self.rois[sensor_id] = {}
             items = self.plots[sensor_id]['do_reading'].getPlotItem().items
-            # The first item is the plot curve, the next two are the ROIs
-            self.rois[sensor_id]['roi1'] = items[0]
-            self.rois[sensor_id]['roi2'] = items[1]
+            # Find the ROIs among the plot items
+            rois_found = [item for item in items if isinstance(item, pg.LinearRegionItem)]
+            if len(rois_found) >= 2:
+                self.rois[sensor_id]['roi1'] = rois_found[0]
+                self.rois[sensor_id]['roi2'] = rois_found[1]
 
-            # Connect the signal for region changes to the update method
-            self.rois[sensor_id]['roi1'].sigRegionChanged.connect(
-                lambda roi, s=sensor_id: self.update_cal_plot(s, 'cal_0', roi)
-            )
-            self.rois[sensor_id]['roi2'].sigRegionChanged.connect(
-                lambda roi, s=sensor_id: self.update_cal_plot(s, 'cal_1', roi)
-            )
-
-            # Add dummy data for visualization purposes
-            self.plots[sensor_id]['do_reading'].plot(list(range(100)), [x / 20 for x in range(100)])
+                # Connect the signal for region changes to the update method
+                self.rois[sensor_id]['roi1'].sigRegionChanged.connect(
+                    lambda roi, s=sensor_id: self.update_cal_plot(s, 'cal_0', roi)
+                )
+                self.rois[sensor_id]['roi2'].sigRegionChanged.connect(
+                    lambda roi, s=sensor_id: self.update_cal_plot(s, 'cal_1', roi)
+                )
 
     def update_cal_plot(self, sensor_id, cal_plot_key, roi):
         """
@@ -248,6 +265,8 @@ class CalibrationWindow(QDialog):
                 # Simplified Dash-Bassingthwaighte model
                 model = HemoglobinDissociationDash2010(pH=ph, pCO2=pco2)
                 so2 = model.calculate_sO2(po2,temperature=temp) * 100  # Convert to percentage
+                #emit signal
+                self.update_dissociation_signal.emit(ph, pco2)
 
             if so2 is not None:
                 self.dissociation_plot_widget.clear()
@@ -262,6 +281,76 @@ class CalibrationWindow(QDialog):
             self.dissociation_plot_widget.clear()
 
     def load_data_button_onclick(self, data):
-        # Method to load data into the plots when the Load Data button is clicked
-        pass
+        #open file dialog to select data file
+        file_path, _ = QFileDialog.getOpenFileName(self, 'Load sensor data file', '', 'CSV Files (*.csv)')
+        if file_path:
+            self.load_data(file_path)
 
+    def load_data(self, file_path):
+        if not os.path.exists(file_path):
+            self.main_app.log_widget.append(f"Data file not found: {file_path}")
+            return
+
+        # Use the methods from the DataSaver object to get raw numpy arrays
+        do_data = self.main_app.data_saver.read_do_data(file_path)
+        temp_data = self.main_app.data_saver.read_temp_data(file_path)
+
+        if do_data.size == 0 and temp_data.size == 0:
+            self.main_app.log_widget.append("Warning: Data file appears to be empty.")
+            return
+
+        # Pass the raw data directly to the plotting method
+        self.update_time_plots(temp_data, do_data)
+
+        # In calibration_window.py
+
+    def update_time_plots(self, raw_temp_data, raw_do_data):
+        """
+        Updates the time plots with raw, unaligned DO and temperature data
+        by updating the data of the existing curve items.
+        """
+        # --- 1. Parse Temperature Data ---
+        temps_by_idx = {}
+        if raw_temp_data.size > 0:
+            for row in raw_temp_data:
+                timestamp, idx, temp = row[0], row[1], row[2]
+                if idx not in temps_by_idx:
+                    temps_by_idx[idx] = {'time': [], 'temp': []}
+                temps_by_idx[idx]['time'].append(timestamp)
+                temps_by_idx[idx]['temp'].append(temp)
+
+        # --- 2. Update DO Sensor Plots ---
+        if raw_do_data.size > 0:
+            do_times = raw_do_data[:, 0]
+            # Use setData() to update the curves without removing ROIs
+            self.plots['sensor1']['do_curve'].setData(do_times, raw_do_data[:, 1])
+            self.plots['sensor2']['do_curve'].setData(do_times, raw_do_data[:, 2])
+        else:
+            # If no data, clear the curves
+            self.plots['sensor1']['do_curve'].clear()
+            self.plots['sensor2']['do_curve'].clear()
+
+        # --- 3. Update Temperature Plots ---
+        temp_indices = sorted(temps_by_idx.keys())
+
+        # Update Sensor 1 Temperature Plot
+        if len(temp_indices) > 0:
+            idx1 = temp_indices[0]
+            data1 = temps_by_idx[idx1]
+            self.plots['sensor1']['temp_curve'].setData(data1['time'], data1['temp'])
+        else:
+            self.plots['sensor1']['temp_curve'].clear()
+
+        # Update Sensor 2 Temperature Plot
+        if len(temp_indices) > 1:
+            idx2 = temp_indices[1]
+            data2 = temps_by_idx[idx2]
+            self.plots['sensor2']['temp_curve'].setData(data2['time'], data2['temp'])
+        else:
+            self.plots['sensor2']['temp_curve'].clear()
+
+        # --- 4. Refresh Calibration ROI plots ---
+        self.update_cal_plot('sensor1', 'cal_0', self.rois['sensor1']['roi1'])
+        self.update_cal_plot('sensor1', 'cal_1', self.rois['sensor1']['roi2'])
+        self.update_cal_plot('sensor2', 'cal_0', self.rois['sensor2']['roi1'])
+        self.update_cal_plot('sensor2', 'cal_1', self.rois['sensor2']['roi2'])

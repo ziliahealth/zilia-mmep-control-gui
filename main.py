@@ -480,6 +480,12 @@ class App(QMainWindow, QObject):
         self.flow_controllers.mcu_signal.connect(self.mcu_worker.submit_command)
         self.flow_controllers.update_plot_signal.connect(self.gui_updater.update_flow_plot)
 
+        # DO Sensor Signals (from GUI to worker)
+        self.do_enable_change_signal.connect(self.do_sensors.do_enable)
+        self.do_start_stop_signal.connect(self.do_sensors.do_start_stop)
+        self.do_sensors.mcu_signal.connect(self.mcu_worker.submit_command)
+        self.do_sensors.update_plot_signal.connect(self.gui_updater.update_do_plot)
+
         # Temperature Controller Signals (from GUI to worker)
         self.tc_enable_change_signal.connect(self.temp_controllers.set_enable)
         self.tc_target_temp_change_signal.connect(self.temp_controllers.set_temperature)
@@ -488,12 +494,8 @@ class App(QMainWindow, QObject):
         self.tc_continuous_reading_signal.connect(self.temp_controllers.set_continuous_reading)
         self.temp_controllers.mcu_signal.connect(self.mcu_worker.submit_command)
         self.temp_controllers.update_plot_signal.connect(self.gui_updater.update_temp_plot)
+        self.temp_controllers.update_temperature_signal.connect(self.do_sensors.update_last_temperature)
 
-        # DO Sensor Signals (from GUI to worker)
-        self.do_enable_change_signal.connect(self.do_sensors.do_enable)
-        self.do_start_stop_signal.connect(self.do_sensors.do_start_stop)
-        self.do_sensors.mcu_signal.connect(self.mcu_worker.submit_command)
-        self.do_sensors.update_plot_signal.connect(self.gui_updater.update_do_plot)
 
         # Sequence Runner Signals
         self.load_and_start_sequence_signal.connect(self.sequence_runner.load_and_start_sequence)
@@ -540,7 +542,7 @@ class App(QMainWindow, QObject):
 
     def open_calibration_window(self):
         """Opens the DO sensor calibration window."""
-        calibration_dialog = CalibrationWindow(self)
+        calibration_dialog = CalibrationWindow(self,parent=self)
         result = calibration_dialog.exec_()
         if result == QDialog.Accepted:
             self.log_widget.append("Calibration Accepted.")
