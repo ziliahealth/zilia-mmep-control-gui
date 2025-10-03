@@ -2,6 +2,7 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from mcu import MCUCommands
 from collections import deque
+from do_sensor_calibration.clarke_electrode import ClarkeElectrode,CalibrationPoint,
 
 class DOCommands(MCUCommands):
     #DO Sensor Commands

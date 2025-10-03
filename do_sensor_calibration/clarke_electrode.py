@@ -112,6 +112,10 @@ class ClarkeElectrode:
         water_vp = self.vapor_pressure_func(temperature)
         return (self.atmospheric_pressure - water_vp) * so2
 
+    def update_atmospheric_pressure(self, new_pressure: float):
+        """Updates the atmospheric pressure used in calculations."""
+        self.atmospheric_pressure = new_pressure
+
     def get_po2(self, measured_voltage: float | np.ndarray, temperature: float | np.ndarray) -> float | np.ndarray:
         """Converts a measured voltage to pO2 in mmHg using the calibration."""
         if not self.is_calibrated:
