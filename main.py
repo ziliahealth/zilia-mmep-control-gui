@@ -11,7 +11,7 @@ from mcu import MCUWorker
 from guiupdater import GUIUpdater
 from flow_controller import FlowControllerThread
 from temperature_controller import TemperatureControllerThread
-from do_sensor import DOSensorThread
+from do_sensor import DOSensorThread, FluidType, DOUnits
 from datasaver import DataSaver
 from sequencerunner import SequenceRunner
 from calibration_window import CalibrationWindow
@@ -51,6 +51,8 @@ class App(QMainWindow, QObject):
     # DO sensor signals
     do_enable_change_signal = pyqtSignal(int, bool)
     do_start_stop_signal = pyqtSignal(bool)
+    do_fluid_change_signal = pyqtSignal(FluidType)
+    do_units_change_signal = pyqtSignal(DOUnits)
 
     clear_plots_signal = pyqtSignal()
 
@@ -89,6 +91,7 @@ class App(QMainWindow, QObject):
         """Sets the main window's title, size, and stylesheet."""
         self.setWindowTitle("Zilia MMEP Control GUI")
         self.setGeometry(100, 100, 1900, 1400)
+        self.setWindowState(Qt.WindowMaximized)
         self.setStyleSheet("background-color: black; color: rgb(139,203,149)")
 
     def _init_ui(self):
@@ -380,15 +383,16 @@ class App(QMainWindow, QObject):
         self.sequence_runner = SequenceRunner()
         self.sequence_runner.moveToThread(self.sequence_thread)
 
-        # --- Data Saver Setup ---
-        self.data_saver_thread = QThread()
-        self.data_saver_thread.setObjectName("DataSaver_Thread")
-        self.data_saver = DataSaver()
-        self.data_saver.moveToThread(self.data_saver_thread)
 
         self.flow_controllers = FlowControllerThread()
         self.temp_controllers = TemperatureControllerThread()
         self.do_sensors = DOSensorThread()
+        # --- Data Saver Setup ---
+        self.data_saver_thread = QThread()
+        self.data_saver_thread.setObjectName("DataSaver_Thread")
+        self.data_saver = DataSaver(self.do_sensors)
+        self.data_saver.moveToThread(self.data_saver_thread)
+
         self.gui_updater = GUIUpdater(self.log_widget,
                                       self.do_plot_widget,
                                       self.temp_plot_widget,
@@ -465,7 +469,6 @@ class App(QMainWindow, QObject):
         # Connect MCU data directly to the saver
         self.mcu_worker.parser.flow_data_signal.connect(self.data_saver.save_flow_data)
         self.mcu_worker.parser.temp_data_signal.connect(self.data_saver.save_temp_data)
-        self.mcu_worker.parser.do_data_signal.connect(self.data_saver.save_do_data)
 
         # Flow Controller Signals (from GUI to worker)
         self.fc_pump_settings_peristaltic_signal.connect(self.flow_controllers.set_parameters_peristaltic)
@@ -485,6 +488,9 @@ class App(QMainWindow, QObject):
         self.do_start_stop_signal.connect(self.do_sensors.do_start_stop)
         self.do_sensors.mcu_signal.connect(self.mcu_worker.submit_command)
         self.do_sensors.update_plot_signal.connect(self.gui_updater.update_do_plot)
+        self.do_fluid_change_signal.connect(self.do_sensors.update_fluid_type)
+        self.do_units_change_signal.connect(self.gui_updater.update_do_units)
+        self.do_sensors.save_data_signal.connect(self.data_saver.save_do_data)
 
         # Temperature Controller Signals (from GUI to worker)
         self.tc_enable_change_signal.connect(self.temp_controllers.set_enable)
@@ -520,6 +526,7 @@ class App(QMainWindow, QObject):
         self.clear_plots_signal.connect(self.flow_controllers.clear_buffers)
         self.clear_plots_signal.connect(self.temp_controllers.clear_buffers)
         self.clear_plots_signal.connect(self.do_sensors.clear_buffers)
+        self.gui_updater.clear_buffers_signal.connect(self.do_sensors.clear_buffers)
 
     def _start_services(self):
         """Loads the default configuration and starts all background threads."""
@@ -545,7 +552,7 @@ class App(QMainWindow, QObject):
         calibration_dialog = CalibrationWindow(self,parent=self)
         result = calibration_dialog.exec_()
         if result == QDialog.Accepted:
-            self.log_widget.append("Calibration Accepted.")
+            pass
         else:
             self.log_widget.append("Calibration Canceled.")
 
@@ -728,10 +735,28 @@ class App(QMainWindow, QObject):
             pass
 
     def do_fluid_onchange(self):
-        pass
+        if self.do_sensor_fluid_dropdown.currentText() == 'Water':
+            self.do_fluid_change_signal.emit(FluidType.WATER)
+        if self.do_sensor_fluid_dropdown.currentText() == 'Blood':
+            self.do_fluid_change_signal.emit(FluidType.BLOOD)
+
+        else:
+            self.do_fluid_change_signal.emit(FluidType.WATER)
+            self.do_sensor_fluid_dropdown.setCurrentText('Water')
+
 
     def do_units_onchange(self):
-        pass
+        units = self.do_sensor_units_dropdown.currentText()
+        if units == 'Raw [V]':
+            self.do_units_change_signal.emit(DOUnits.VOLTAGE)
+
+        elif units == 'pO2 [mmhg]':
+            self.do_units_change_signal.emit(DOUnits.PO2_MMHG)
+        elif units == 'SO2 [%]':
+            self.do_units_change_signal.emit(DOUnits.SO2_PERCENT)
+        else:
+            self.do_units_change_signal.emit(DOUnits.VOLTAGE)
+            self.do_sensor_units_dropdown.setCurrentText('Raw [V]')
 
     def update_connected(self, is_connected):
         self.connected = is_connected
