@@ -1,6 +1,4 @@
-import time
-
-from PyQt5.QtCore import QThread, pyqtSignal, QObject
+from PyQt5.QtCore import QThread, pyqtSignal
 from mcu import MCUCommands
 from collections import deque
 
