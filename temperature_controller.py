@@ -66,6 +66,7 @@ class TemperatureControllerThread(QThread):
     # Signal now emits the command string and its unique communication ID
     mcu_signal = pyqtSignal(str, str)
     update_plot_signal = pyqtSignal()  # Signal containing data to be logged and plotted
+    update_temperature_signal = pyqtSignal(list)
     commands = TemperatureControllerCommands()
 
     def __init__(self):
@@ -140,10 +141,13 @@ class TemperatureControllerThread(QThread):
         data_length = len(data)
         num_controllers_in_data = (data_length - 1) // 3
         new_data = False
+        do_sensor_temp = []
         for i in range(num_controllers_in_data):
             index = data[1 + i * 3]
             temp = data[2 + i * 3]
             duty = data[3 + i * 3]
+            do_sensor_temp.append(index)
+            do_sensor_temp.append(temp)
             for controller in self.temperature_controllers:
                 if controller.num == index and controller.sensor:
                     new_data = True
@@ -152,6 +156,7 @@ class TemperatureControllerThread(QThread):
                     break
         if new_data:
             self.update_plot_signal.emit()
+            self.update_temperature_signal.emit(do_sensor_temp)
 
     def clear_buffers(self):
         for controller in self.temperature_controllers:

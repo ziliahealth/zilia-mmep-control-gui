@@ -1,10 +1,12 @@
 #QObject that refreshes the GUI on a seperate thread
 from PyQt5.QtCore import QThread, pyqtSignal, QObject, Qt, QDateTime, QIODevice,QTimer
+from do_sensor import DOUnits
 class GUIUpdater(QThread):
     update_signal = pyqtSignal(str)
     running_signal = pyqtSignal(bool)
     connected_signal = pyqtSignal(bool)
     recording_signal = pyqtSignal(bool)
+    clear_buffers_signal = pyqtSignal()
 
     def __init__(self, log_widget,
                  do_plot_widget,
@@ -27,12 +29,19 @@ class GUIUpdater(QThread):
         self.do_pen_colors = [(255, 255, 102), (139, 203, 149)]
         self.temp_pen_colors = [(255, 255, 102), (139, 203, 149)]
         self.flow_pen_colors =  [(255, 255, 102), (139, 203, 149), (51, 204, 204), (0, 102, 255)]
+        self.current_do_units = DOUnits.VOLTAGE
 
     def update_do_plot(self):
         self.do_plot_widget.clear()
         for i, sensor in enumerate(self.do_sensors):
             if sensor.enabled:
-                self.do_plot_widget.plot(list(sensor.time_buffer), list(sensor.raw_data_buffer), pen=self.do_pen_colors[i], name=sensor.name)
+                if units := self.current_do_units:
+                    if units == DOUnits.VOLTAGE:
+                        self.do_plot_widget.plot(list(sensor.time_buffer), list(sensor.raw_data_buffer), pen=self.do_pen_colors[i], name=sensor.name)
+                    elif units == DOUnits.PO2_MMHG:
+                        self.do_plot_widget.plot(list(sensor.time_buffer), list(sensor.partial_pressure_buffer), pen=self.do_pen_colors[i], name=sensor.name)
+                    elif units == DOUnits.SO2_PERCENT:
+                        self.do_plot_widget.plot(list(sensor.time_buffer), list(sensor.saturation_buffer), pen=self.do_pen_colors[i], name=sensor.name)
 
     def update_temp_plot(self):
         self.temp_plot_widget.clear()
@@ -58,3 +67,19 @@ class GUIUpdater(QThread):
         else:
             #self.start_button.setEnabled(False)
             self.connect_button.setText('Connect MCU')
+    def update_do_units(self, units: DOUnits):
+        # updates the plot y-axis label based on the selected units
+        self.current_do_units = units
+        if units == DOUnits.VOLTAGE:
+            print(DOUnits.VOLTAGE)
+            self.do_plot_widget.setLabel('left', 'DO Sensor [V]')
+        elif units == DOUnits.PO2_MMHG:
+            print(DOUnits.PO2_MMHG)
+            self.do_plot_widget.setLabel('left', 'Oxygen Partial pressure PO2 [mmHg]')
+        elif units == DOUnits.SO2_PERCENT:
+            print(DOUnits.SO2_PERCENT)
+            self.do_plot_widget.setLabel('left', 'Oxygen saturation SO2 [-]')
+
+        self.clear_buffers_signal.emit()
+
+
