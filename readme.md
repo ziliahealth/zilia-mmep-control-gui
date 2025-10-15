@@ -79,9 +79,12 @@ Save Configuration: Saves all current setpoints, PID values, pump settings, and 
 Load Configuration: Restores the GUI to a previously saved state, instantly setting up the hardware for a replicated experiment.
 
 ### 6. DO Sensor Calibration
-To be implemented.
+A temperature corrected do sensor calibraiton method has been implemented that allows to easily calibrate dissolved oxygen readings in partial pressure or saturation in blood or water.
+The methodology is discussed [here](https://ziliahealth.atlassian.net/wiki/spaces/MMEP/pages/edit-v2/3268542465?draftShareId=ee93e285-d9c6-438b-8ff9-749e79e15509)
 
-System Architecture: Threading and Signals
+### 7. System Architecture: 
+
+#### Threading and Signals
 The application's responsiveness is achieved through a multi-layered, multithreaded architecture using PyQt's QThread and signal/slot mechanism. This ensures that the user interface remains fast and responsive while backend processes handle complex logic and communication.
 
 Main Thread: This thread is exclusively for the User Interface. It handles all user interactions (button clicks, text input) and dispatches tasks to other threads by emitting signals. It never performs slow operations, ensuring the GUI never freezes.
