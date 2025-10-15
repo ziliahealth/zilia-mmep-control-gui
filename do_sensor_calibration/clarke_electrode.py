@@ -3,6 +3,8 @@
 import numpy as np
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('TkAgg')  # Use TkAgg backend for compatibility
 from dataclasses import dataclass, field
 from datasaver import DataSaver
 from typing import Callable, Tuple
@@ -254,3 +256,12 @@ if __name__ == "__main__":
                                       point_type='low')
 
     visualizer.plot_calibration_surface(electrode)
+    temp = np.linspace(25,40,100)
+    po2 = electrode.compute_henrys_pO2(temp, so2=0.2095)
+    plt.figure()
+    plt.plot(temp,po2)
+    plt.title('Henry\'s Law: pO2 vs Temperature at 20.95% Saturation')
+    plt.xlabel('Temperature (°C)')
+    plt.ylabel('pO2 (mmHg)')
+    plt.grid()
+    plt.show()

@@ -13,7 +13,7 @@ class DataSaver(QObject):
     - It can also parse these files and perform common processing tasks like slicing and interpolation.
     It's designed to be moved to a separate thread to avoid blocking the GUI.
     """
-    def __init__(self, do_sensors):
+    def __init__(self, do_sensors = None):
         super().__init__()
         self.filename = None
         self.saving = False
